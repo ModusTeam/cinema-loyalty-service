@@ -15,5 +15,6 @@ export enum AggregateType {
 
 export enum EventPatternType {
   TICKET_PURCHASED = 'TicketPurchased',
+  CUSTOMER_FACTS_CHANGED = 'CUSTOMER_FACTS_CHANGED',
   USER_DATE_OF_BIRTH_SET = 'USER_DATE_OF_BIRTH_SET',
 }

@@ -1,3 +1,5 @@
+import { CustomerFactsService } from './customer-facts.service';
+import { CustomerFactsChangedConsumer } from './consumers/customer-facts-changed.consumer';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ClientsModule } from '@nestjs/microservices';
@@ -51,11 +53,13 @@ import { RmqDeliveryService } from './consumers/rmq-delivery.service';
   ],
   controllers: [
     LoyaltyController,
+    CustomerFactsChangedConsumer,
     TicketPurchasedConsumer,
     UserDateOfBirthSetConsumer,
   ],
   providers: [
     LoyaltyService,
+    CustomerFactsService,
     LoyaltyExpirationService,
     LoyaltySchedulerProducer,
     LoyaltyQueueProcessor,

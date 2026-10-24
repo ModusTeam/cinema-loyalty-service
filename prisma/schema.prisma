@@ -257,3 +257,42 @@ model UserAchievement {
   @@index([achievementId])
   @@map("user_achievements")
 }
+
+enum CustomerFactState {
+  PENDING
+  APPLIED
+  BLOCKED
+}
+
+model CustomerFactsProjection {
+  userId           String                @id @map("user_id") @db.Uuid
+  appliedRevision  Int                   @default(0) @map("applied_revision")
+  sourceEventId    String?               @map("source_event_id") @db.Uuid
+  occurredAtUtc    DateTime?             @map("occurred_at_utc") @db.Timestamptz(3)
+  registeredAtUtc  DateTime?             @map("registered_at_utc") @db.Timestamptz(3)
+  dobFirstSetAtUtc DateTime?             @map("dob_first_set_at_utc") @db.Timestamptz(3)
+  dateOfBirth      DateTime?             @map("date_of_birth") @db.Date
+  lastAppliedAt    DateTime?             @map("last_applied_at") @db.Timestamptz(3)
+  receipts         CustomerFactReceipt[]
+
+  @@map("customer_facts_projections")
+}
+
+// Partial PENDING recovery index is maintained in the SQL migration (Prisma has no schema declaration here).
+model CustomerFactReceipt {
+  eventId      String                  @id @map("event_id") @db.Uuid
+  userId       String                  @map("user_id") @db.Uuid
+  revision     Int
+  payload      Json                    @db.JsonB
+  fingerprint  String                  @db.VarChar(64)
+  state        CustomerFactState       @default(PENDING)
+  receivedAt   DateTime                @default(now()) @map("received_at") @db.Timestamptz(3)
+  appliedAt    DateTime?               @map("applied_at") @db.Timestamptz(3)
+  errorCode    String?                 @map("error_code") @db.VarChar(64)
+  recheckCount Int                     @default(0) @map("recheck_count")
+  recheckedAt  DateTime?               @map("rechecked_at") @db.Timestamptz(3)
+  projection   CustomerFactsProjection @relation(fields: [userId], references: [userId], onDelete: Restrict)
+
+  @@unique([userId, revision])
+  @@map("customer_fact_receipts")
+}

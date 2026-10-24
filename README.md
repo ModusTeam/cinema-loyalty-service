@@ -719,13 +719,11 @@ To activate coverage and the existing Quality Gate:
 CI and the Docker builder generate it before compilation; Node runs compiled
 artifacts from `dist`. Jest coverage, Sonar CI scopes and CodeRabbit exclude this
 directory, while `prisma/schema.prisma` and SQL migrations remain in review scope.
-The corrected `.gitignore` prevents new untracked client files being added, but
-does not untrack existing files. PR #15 includes generated-client changes, so
-index cleanup is deliberately deferred: after coordinating/merging it, remove
-only `src/generated/prisma` from the index (`git rm -r --cached -- src/generated/prisma`)
-in a separate change. Preserve local files and verify generation/build on a clean
-checkout before committing that removal. Run `bun x --no-install prisma generate`
-after installation and schema changes.
+The generated client is ignored and is not tracked in Git. After installing
+dependencies on a clean checkout, run `bun x --no-install prisma generate` before
+building or testing, and repeat generation after schema changes. CI and Docker
+already perform this step. Local generated files are preserved when removing
+them from Git tracking.
 
 Official references: [Sonar automatic analysis](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/automatic-analysis),
 [LCOV import](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/test-coverage/javascript-typescript-test-coverage),
