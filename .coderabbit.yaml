@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+language: uk-UA
+reviews:
+  profile: assertive
+  high_level_summary: true
+  review_status: true
+  poem: false
+  auto_approvals:
+    enabled: false
+  auto_review:
+    enabled: true
+    drafts: true
+  path_filters:
+    - '!src/generated/prisma/**'
+    - '!node_modules/**'
+    - '!dist/**'
+    - '!build/**'
+    - '!coverage/**'
+  path_instructions:
+    - path: '**'
+      instructions: >-
+        Prioritize confirmed bugs, security issues and correctness defects. Give a
+        concrete failure scenario and the violated guarantee; label suggestions
+        and unverified risks clearly. Avoid duplicate findings, speculative
+        abstractions and refactors based only on file length or condition count.
+        Never recommend editing generated code or weakening test assertions.
+        Apply AGENTS.md and the current documented architecture; planned economy
+        rules are not implemented requirements unless the PR explicitly activates them.
+    - path: 'src/{loyalty,achievements}/**'
+      instructions: >-
+        Check balance/ledger consistency, atomic profile mutations, persistent
+        idempotency and profile locking. Check debit-linked refunds, GOLD order
+        ownership, birthday deduplication and tier qualification. Related business
+        state, ledger, dedupe and outbox/intents must commit in one transaction.
+    - path: 'src/**/{*consumer*,*processor*,*publisher*,*delivery*,*quarantine*,*intent*,*listener*,*queue*}*'
+      instructions: >-
+        Check ACK/NACK timing, persistent deduplication, lost-ACK and out-of-order
+        delivery, poison-message retry limits, restart recovery, and claim/lease
+        fencing. No network calls inside retried DB transactions. Preserve
+        at-least-once delivery with idempotency; do not demand exactly-once delivery.
+    - path: '{prisma/**,src/prisma/**}'
+      instructions: >-
+        Check transaction boundaries, lock ordering, concurrent writes, unique
+        constraints, referential integrity, indexes and query access paths.
+        Assess migration locks, data loss, rollback and schema compatibility with
+        existing instances. Require real PostgreSQL evidence for concurrency claims.
+    - path: '{src/**/*.spec.ts,test/**}'
+      instructions: >-
+        Check meaningful regression assertions, negative cases, concurrent
+        operations, rollback and duplicate events. Use real PostgreSQL for locks
+        and constraints, and RabbitMQ/Redis transport coverage where delivery
+        behavior changes. Do not replace these guarantees with mocks or weaken assertions.
+    - path: '{.github/workflows/**,Dockerfile,.dockerignore}'
+      instructions: >-
+        Check least privilege, secret exposure, pinned actions, frozen dependency
+        installation, reproducible builds and preserved CI gates. Keep Bun 1.3.13
+        for dependencies/scripts, Node.js 22 runtime and Jest tests.
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - AGENTS.md

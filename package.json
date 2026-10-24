@@ -99,7 +99,8 @@
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "collectCoverageFrom": [
-      "**/*.(t|j)s"
+      "**/*.(t|j)s",
+      "!generated/prisma/**"
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
