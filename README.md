@@ -671,6 +671,67 @@ bull:loyalty-queue:completed
 bull:loyalty-queue:failed
 ```
 
+## Automated quality analysis and review
+
+`.coderabbit.yaml` configures assertive reviews, including Draft PRs, with focused
+accounting, delivery, PostgreSQL, test and CI instructions. Install/enable the
+CodeRabbit GitHub App for this repository to activate it. Automatic approvals and
+requests for changes are disabled; keep AI review advisory in repository branch
+protection settings. Built-in security tools retain their defaults.
+
+SonarQube Cloud project `ModusTeam_cinema-loyalty-service` (organization
+`modusteam`) currently uses **Automatic Analysis**. `sonar-project.properties`
+prepares CI-based source/test scopes and LCOV import, but Automatic Analysis ignores
+that file and does not import coverage. No second scanner pipeline is enabled.
+Until switching, apply the generated-code exclusion `src/generated/prisma/**` in
+SonarQube Cloud **Administration > General Settings > Analysis Scope > Files**.
+
+To activate coverage and the existing Quality Gate:
+
+1. Confirm project permissions and store a scoped analysis token as GitHub Actions
+   secret `SONAR_TOKEN`; never commit it. Confirm the plan supports PR analysis.
+2. In SonarQube Cloud **Administration > Analysis Method**, turn off Automatic
+   Analysis. Coordinate this with the scanner change to avoid concurrent pipelines.
+3. The existing CI job includes the official SonarSource scan action v8.3.0,
+   pinned to verified SHA `d209202bc7d53ff1cc128f7f907dac145c9d6ae9`, after
+   all test/build gates, with full Git history (`fetch-depth: 0`). After disabling
+   Automatic Analysis, set repository Actions variable `SONAR_CI_ENABLED=true`.
+   Leave it unset/false until then: the scanner is skipped, preventing a competing
+   pipeline. To pause CI analysis, set the variable to false before re-enabling
+   Automatic Analysis. No external settings are changed by the workflow.
+   Analysis runs on same-repository PRs and pushes to `master`; feature branch
+   pushes do not create duplicate runs. Fork PRs and Dependabot runs execute all
+   existing test/build gates but skip the token-bearing scan step. Review these
+   PRs independently and analyze their merged commit on `master`; do not require
+   an unavailable PR Sonar check for these cases or expose secrets through
+   `pull_request_target` as a workaround. A skipped scan is not a passed Quality Gate.
+4. CI already runs `bun run test:cov --runInBand` once in place of the unit test
+   command. Jest produces `coverage/lcov.info`; import it using the properties
+   file. This is **unit coverage**, not combined integration/transport coverage.
+5. Verify the first cloud analysis: source/test scopes are disjoint, generated
+   Prisma code is absent, LCOV paths resolve, and New Code coverage is populated.
+   The scanner waits for the existing Quality Gate (`sonar.qualitygate.wait=true`)
+   and fails CI if it fails; no thresholds are overridden. Configure required
+   checks in branch protection only after observing the first successful scan,
+   accounting for fork/Dependabot skips. Keep all CI gates.
+
+`src/generated/prisma/` is reproducible output of the locked Prisma generator.
+CI and the Docker builder generate it before compilation; Node runs compiled
+artifacts from `dist`. Jest coverage, Sonar CI scopes and CodeRabbit exclude this
+directory, while `prisma/schema.prisma` and SQL migrations remain in review scope.
+The corrected `.gitignore` prevents new untracked client files being added, but
+does not untrack existing files. PR #15 includes generated-client changes, so
+index cleanup is deliberately deferred: after coordinating/merging it, remove
+only `src/generated/prisma` from the index (`git rm -r --cached -- src/generated/prisma`)
+in a separate change. Preserve local files and verify generation/build on a clean
+checkout before committing that removal. Run `bun x --no-install prisma generate`
+after installation and schema changes.
+
+Official references: [Sonar automatic analysis](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/automatic-analysis),
+[LCOV import](https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/test-coverage/javascript-typescript-test-coverage),
+[CodeRabbit configuration](https://docs.coderabbit.ai/reference/configuration).
+
+
 ## Related Documentation
 
 | File | Purpose |
