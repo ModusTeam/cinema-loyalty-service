@@ -102,8 +102,7 @@
       "**/*.(t|j)s",
       "!generated/prisma/**"
     ],
-    "coverageDirectory": "../coverage/unit",
-    "coverageProvider": "babel",
+    "coverageDirectory": "../coverage",
     "testEnvironment": "node"
   }
 }

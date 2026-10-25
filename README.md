@@ -705,15 +705,9 @@ To activate coverage and the existing Quality Gate:
    PRs independently and analyze their merged commit on `master`; do not require
    an unavailable PR Sonar check for these cases or expose secrets through
    `pull_request_target` as a workaround. A skipped scan is not a passed Quality Gate.
-4. CI runs `bun run test:cov --runInBand` once and the existing PostgreSQL
-   integration runner collects coverage during its normal test run. Reports are
-   written separately to `coverage/unit/lcov.info` and
-   `coverage/integration/lcov.info`; Sonar imports both without overwriting either.
-   Both use ts-jest and the Babel coverage provider, restricted to maintained
-   application sources. Generated Prisma code, fixtures and tests are excluded.
-   RMQ workers and the operator CLI run compiled code in separate processes;
-   their execution is not included in these Jest reports. Transport tests remain
-   required behavioral checks.
+4. CI already runs `bun run test:cov --runInBand` once in place of the unit test
+   command. Jest produces `coverage/lcov.info`; import it using the properties
+   file. This is **unit coverage**, not combined integration/transport coverage.
 5. Verify the first cloud analysis: source/test scopes are disjoint, generated
    Prisma code is absent, LCOV paths resolve, and New Code coverage is populated.
    The scanner waits for the existing Quality Gate (`sonar.qualitygate.wait=true`)

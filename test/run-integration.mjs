@@ -41,7 +41,6 @@ try {
       '--config',
       'test/jest-integration.json',
       '--runInBand',
-      '--coverage',
       ...process.argv.slice(2),
     ],
     env,

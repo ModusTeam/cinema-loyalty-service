@@ -3,13 +3,6 @@
   "testEnvironment": "node",
   "testRegex": "test/integration/.*\\.integration-spec\\.ts$",
   "testTimeout": 20000,
-  "coverageProvider": "babel",
-  "coverageDirectory": "<rootDir>/coverage/integration",
-  "collectCoverageFrom": [
-    "src/**/*.(t|j)s",
-    "!src/**/*.spec.ts",
-    "!src/generated/prisma/**"
-  ],
   "transform": { "^.+\\.(t|j)s$": "ts-jest" },
   "moduleNameMapper": {
     "^src/(.*)$": "<rootDir>/src/$1",
