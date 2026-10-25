@@ -6,6 +6,7 @@ import {
   describe,
   it,
   expect,
+  jest,
   beforeAll,
   afterAll,
   beforeEach,
@@ -13,6 +14,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 import { Pool } from 'pg';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { CustomerFactsService } from '../../src/loyalty/customer-facts.service';
@@ -226,6 +228,146 @@ describe('passive customer facts on PostgreSQL', () => {
       );
     }
   });
+  it('continues the same recovery pass after one user transaction fails', async () => {
+    const first = customerFacts('10000000-0000-4000-8000-000000000001');
+    const second = customerFacts('10000000-0000-4000-8000-000000000002');
+    await service.ingest(first.registered);
+    await service.ingest(second.registered);
+    await prisma.customerFactReceipt.createMany({
+      data: [first.set, second.set].map((fact) => ({
+        eventId: fact.eventId,
+        userId: fact.userId,
+        revision: fact.revision,
+        payload: fact,
+        fingerprint: 'fixture',
+      })),
+    });
+    const firstProjection = await projection(first.set.userId);
+    const firstReceipt = await prisma.customerFactReceipt.findUniqueOrThrow({
+      where: { eventId: first.set.eventId },
+    });
+    await observer.query(`CREATE FUNCTION customer_facts_recovery_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.user_id = '10000000-0000-4000-8000-000000000001'::uuid AND NEW.state = 'APPLIED' THEN
+          RAISE EXCEPTION 'PRIVATE_RECOVERY_FAILURE private@example.invalid';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER customer_facts_recovery_test_fail BEFORE UPDATE ON customer_fact_receipts
+      FOR EACH ROW EXECUTE FUNCTION customer_facts_recovery_test_fail();`);
+    const errors = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    try {
+      await expect(service.recoverPending()).resolves.toBe(2);
+      expect(await projection(first.set.userId)).toEqual(firstProjection);
+      expect(
+        await prisma.customerFactReceipt.findUniqueOrThrow({
+          where: { eventId: first.set.eventId },
+        }),
+      ).toEqual(firstReceipt);
+      expect(await projection(second.set.userId)).toMatchObject({
+        appliedRevision: 2,
+        sourceEventId: second.set.eventId,
+        dateOfBirth: new Date(second.set.dateOfBirth + 'T00:00:00.000Z'),
+      });
+      expect(
+        await prisma.customerFactReceipt.findUniqueOrThrow({
+          where: { eventId: second.set.eventId },
+        }),
+      ).toMatchObject({ state: 'APPLIED' });
+      expect(errors.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            userId: first.set.userId,
+            code: 'CUSTOMER_FACT_RECOVERY_FAILED',
+          }),
+        ],
+      ]);
+    } finally {
+      errors.mockRestore();
+      await observer.query(
+        'DROP TRIGGER customer_facts_recovery_test_fail ON customer_fact_receipts; DROP FUNCTION customer_facts_recovery_test_fail()',
+      );
+    }
+    const secondProjection = await projection(second.set.userId);
+    await expect(service.recoverPending()).resolves.toBe(1);
+    expect((await projection(first.set.userId)).appliedRevision).toBe(2);
+    expect(await projection(second.set.userId)).toEqual(secondProjection);
+    expect(
+      await prisma.customerFactReceipt.count({ where: { state: 'APPLIED' } }),
+    ).toBe(4);
+  });
+
+  it('advances past a full failing recovery batch and returns to retry it', async () => {
+    const facts = Array.from({ length: 51 }, (_, index) =>
+      customerFacts(
+        '20000000-0000-4000-8000-' + String(index + 1).padStart(12, '0'),
+      ),
+    );
+    const last = facts[facts.length - 1];
+    for (const fact of facts) await service.ingest(fact.registered);
+    await prisma.customerFactReceipt.createMany({
+      data: facts.map(({ set }) => ({
+        eventId: set.eventId,
+        userId: set.userId,
+        revision: set.revision,
+        payload: set,
+        fingerprint: 'fixture',
+      })),
+    });
+    await observer.query(`CREATE FUNCTION customer_facts_starvation_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.user_id < '20000000-0000-4000-8000-000000000051'::uuid AND NEW.state = 'APPLIED' THEN
+          RAISE EXCEPTION 'fixture recovery batch failure';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER customer_facts_starvation_test_fail BEFORE UPDATE ON customer_fact_receipts
+      FOR EACH ROW EXECUTE FUNCTION customer_facts_starvation_test_fail();`);
+    const errors = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+    try {
+      await expect(service.recoverPending()).resolves.toBe(50);
+      expect((await projection(last.set.userId)).appliedRevision).toBe(1);
+      expect(
+        await prisma.customerFactReceipt.count({ where: { state: 'PENDING' } }),
+      ).toBe(51);
+      await expect(service.recoverPending()).resolves.toBe(1);
+      expect((await projection(last.set.userId)).appliedRevision).toBe(2);
+      expect(
+        await prisma.customerFactReceipt.count({ where: { state: 'PENDING' } }),
+      ).toBe(50);
+      expect(errors).toHaveBeenCalledTimes(50);
+    } finally {
+      errors.mockRestore();
+      await observer.query(
+        'DROP TRIGGER customer_facts_starvation_test_fail ON customer_fact_receipts; DROP FUNCTION customer_facts_starvation_test_fail()',
+      );
+    }
+    const completed = await projection(last.set.userId);
+    await expect(service.recoverPending()).resolves.toBe(50);
+    expect(
+      await prisma.customerFactReceipt.count({ where: { state: 'PENDING' } }),
+    ).toBe(0);
+    expect(
+      await prisma.customerFactReceipt.count({ where: { state: 'APPLIED' } }),
+    ).toBe(102);
+    expect(await projection(last.set.userId)).toEqual(completed);
+    // Work committed before the keyset boundary must be found on wrap-around.
+    const earlier = customerFacts('10000000-0000-4000-8000-000000000003');
+    await service.ingest(earlier.registered);
+    await prisma.customerFactReceipt.create({
+      data: {
+        eventId: earlier.set.eventId,
+        userId: earlier.set.userId,
+        revision: earlier.set.revision,
+        payload: earlier.set,
+        fingerprint: 'fixture',
+      },
+    });
+    await expect(service.recoverPending()).resolves.toBe(1);
+    expect((await projection(earlier.set.userId)).appliedRevision).toBe(2);
+    expect(await projection(last.set.userId)).toEqual(completed);
+  });
+
   it('recovers committed pending receipts after provider restart, bounded to 50 revisions per transaction', async () => {
     const { registered, set } = customerFacts();
     await service.ingest(registered);

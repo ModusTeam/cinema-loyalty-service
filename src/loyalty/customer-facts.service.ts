@@ -6,9 +6,9 @@ import {
   lockLoyaltyProfile,
   withTransactionRetry,
 } from '../prisma/profile-transaction';
-import type {
+import {
   Prisma,
-  CustomerFactsProjection,
+  type CustomerFactsProjection,
 } from '../generated/prisma/client';
 import {
   parseCustomerFact,
@@ -24,6 +24,7 @@ export class CustomerFactsService implements OnModuleDestroy {
   private readonly logger = new Logger(CustomerFactsService.name);
   private recovery: Promise<number> | undefined;
   private stopped = false;
+  private recoveryAfterUserId: string | undefined;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -184,22 +185,48 @@ export class CustomerFactsService implements OnModuleDestroy {
     return this.recovery;
   }
 
-  private async recoverBatch(): Promise<number> {
+  private findRecoveryCandidates(
+    afterUserId?: string,
+  ): Promise<{ user_id: string }[]> {
     // Only the next revision is actionable. Missing/BLOCKED predecessors are not
     // polled as ready work. The existing unique tuple supports each next lookup.
-    const candidates = await this.prisma.$queryRaw<{ user_id: string }[]>`
+    const afterUser = afterUserId
+      ? Prisma.sql`AND p.user_id > ${afterUserId}::uuid`
+      : Prisma.empty;
+    return this.prisma.$queryRaw<{ user_id: string }[]>`
       SELECT p.user_id FROM customer_facts_projections p
       JOIN customer_fact_receipts r ON r.user_id = p.user_id
         AND r.revision = p.applied_revision::bigint + 1
-      WHERE r.state = 'PENDING'
+      WHERE r.state = 'PENDING' ${afterUser}
       ORDER BY p.user_id LIMIT 50
     `;
+  }
+
+  private async recoverBatch(): Promise<number> {
+    let candidates = await this.findRecoveryCandidates(
+      this.recoveryAfterUserId,
+    );
+    if (candidates.length === 0 && this.recoveryAfterUserId) {
+      candidates = await this.findRecoveryCandidates();
+    }
+    // Advance even when selected profiles fail. A short batch exhausts this
+    // range, so the next pass starts from the beginning and retries earlier users.
+    this.recoveryAfterUserId =
+      candidates.length === BATCH_SIZE
+        ? candidates[candidates.length - 1]?.user_id
+        : undefined;
     for (const { user_id: userId } of candidates) {
       if (this.stopped) break;
-      await withTransactionRetry(this.prisma, async (tx) => {
-        await lockLoyaltyProfile(tx, userId, true);
-        await this.applyContiguous(tx, userId);
-      });
+      try {
+        await withTransactionRetry(this.prisma, async (tx) => {
+          await lockLoyaltyProfile(tx, userId, true);
+          await this.applyContiguous(tx, userId);
+        });
+      } catch {
+        this.logger.error(
+          JSON.stringify({ userId, code: 'CUSTOMER_FACT_RECOVERY_FAILED' }),
+        );
+      }
     }
     return candidates.length;
   }
