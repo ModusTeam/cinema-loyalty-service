@@ -71,3 +71,71 @@ Document exactly what is acknowledged: queued, processed, or published to extern
 7. Resume upgraded consumers and verify business dedupe, terminal state and backlog. A crash between confirmed publish and operator confirmation can duplicate delivery; the model remains **at least once**. Quarantined messages never loop back automatically.
 
 `bun run test:rmq` uses disposable, resource-limited PostgreSQL and RabbitMQ with real delivery/ACK/redelivery and separate worker processes. It requires Docker but no monolith checkout. `bun run test:transports` separately checks the unchanged monolith envelope and checkout integration against a pinned backend checkout.
+
+### Passive authoritative customer facts
+
+CUSTOMER_FACTS_CHANGED is an additive, facts-only pattern on the existing inbound
+queue. Deploy its reader to **all** consumer replicas before backend PR B emits it.
+The additive 20261024010000_passive_customer_facts migration creates only new
+receipt/projection tables. It does not backfill registration/DOB times. Generate
+the Prisma client and build with the existing workflow. There is no new queue,
+broker policy, reward rule or environment requirement.
+
+Version 1 data contains explicit fields: schemaVersion=1, eventId/userId UUID,
+revision (positive PostgreSQL Int), kind (Registered, DateOfBirthSet,
+DateOfBirthCorrected), occurredAtUtc, registeredAtUtc, dobFirstSetAtUtc,
+dateOfBirth, previousDateOfBirth and correctionOperationId. Nullable fields must
+be present. Instants are canonical UTC ISO strings with milliseconds; DOB is a
+real YYYY-MM-DD calendar date, including leap days. Source instants are retained,
+even when delivery is delayed or the source clock is ahead. Unknown historical
+times stay null. No profile-createdAt/delivery-time substitution is permitted.
+
+Receipt history enforces eventId and (userId, revision) identity. Exact semantic
+replay is harmless; changed identity/content goes to the existing durable inbound
+quarantine. Unknown metadata is ignored rather than copied to facts history.
+Incoming bytes/properties remain subject to the existing restricted quarantine
+retention policy. DOB and private payloads are not logged.
+
+The profile lock precedes receipt/projection writes. Both commit atomically.
+This path may create an empty financial profile for locking, but never alters its
+legacy birthdayDate, balance, counters, tier, GOLD reservation, ledger, grants,
+processed purchases or achievement/outbox records. The existing DOB consumer
+keeps its existing behavior; corrections do not activate the future economy.
+
+A gap is durable PENDING evidence, not proof of an absent source fact. After the
+missing predecessor arrives, up to 50 contiguous revisions apply in that same
+transaction. The existing scheduler checks up to 50 ready users every 10 seconds;
+each uses its own short profile-locked transaction. Restart/another replica resumes
+from PostgreSQL without Redis or a new lease mechanism. This provides eventual
+recovery, not a 10-second delivery SLA. Permanent gaps and BLOCKED predecessors
+do not become actionable until their cause is resolved.
+
+Operational diagnosis (restricted database access):
+- Inspect applied_revision/source_event_id on customer_facts_projections and
+  revision/state/error_code on customer_fact_receipts. Original receipts contain
+  private DOB evidence: do not paste them into general logs or public tickets.
+- A missing revision must be investigated at the authoritative backend audit.
+  Restage the **stored** original source revision with the same eventId/content
+  through its outbox (PR B). Do not invent facts, renumber or skip a revision.
+- A predecessor contradiction is stored as BLOCKED with
+  CUSTOMER_FACT_PREDECESSOR_MISMATCH; the last valid projection is retained.
+  Fix the validated cause first. For a consumer-validation defect corrected by a
+  reviewed release, re-evaluate the immutable original receipt:
+  node dist/tools/recheck-customer-fact.js --recheck-blocked --event-id <uuid>.
+  DATABASE_URL is the only required configuration. The operation takes the same
+  profile lock, records recheck_count/rechecked_at, and changes neither source
+  payload nor predecessor. Exit 0 means no longer blocked; exit 2 means still
+  BLOCKED; exit 1 means failure/ambiguous result, so inspect/retry, not assume rollback.
+- A genuinely contradictory producer history cannot be made valid by replaying
+  it. Stop that stream's source emission, retain the original evidence and obtain
+  an explicitly reviewed authoritative repair. This release deliberately has no
+  payload-edit/skip/force-apply command. Recheck is not authorization to rewrite
+  history or to activate birthday benefits.
+- Direct identity conflicts use the existing quarantine review/replay procedure;
+  unchanged replay remains a conflict until the source/consumer cause is resolved.
+  No automatic quarantine replay or financial compensation is introduced.
+
+Local bun run test:integration and bun run test:rmq cover receipt/projection
+transactions, gaps, controlled overlaps, restart and real broker lost-ACK
+redelivery. Cross-service registration/first-DOB/correction E2E still requires PR B
+and clean pinned commits in both repositories.

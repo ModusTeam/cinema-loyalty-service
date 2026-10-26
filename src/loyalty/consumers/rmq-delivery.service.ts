@@ -10,7 +10,10 @@ import { PrismaService } from 'src/prisma/prisma.service';
 import type { RmqDeliveryConfig } from 'src/config/rmq-delivery.config';
 import { classifyMessageFailure } from './message-failure';
 
-type Operation = 'TicketPurchased' | 'UserDateOfBirthSet';
+type Operation =
+  | 'TicketPurchased'
+  | 'UserDateOfBirthSet'
+  | 'CustomerFactsChanged';
 interface DeliveryState {
   id: string;
   attempts: number;

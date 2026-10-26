@@ -41,3 +41,10 @@ export function replayConfig() {
   return { ...env, app: { rmqUrl: env.RMQ_URL, rmqQueue: env.RMQ_QUEUE } };
 }
 export type ReplayConfiguration = ReturnType<typeof replayConfig>;
+
+export function customerFactsMaintenanceConfig() {
+  return parseEnvironment(
+    replayEnvSchema.pick({ DATABASE_URL: true }),
+    process.env,
+  );
+}

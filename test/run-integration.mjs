@@ -33,6 +33,8 @@ try {
       `${process.env.NODE_OPTIONS ?? ''} --experimental-vm-modules`.trim(),
   };
   run(process.execPath, ['x', 'prisma', 'migrate', 'deploy'], env);
+  // Integration tests exercise the actual maintenance CLI; never use stale dist.
+  run(process.execPath, ['run', 'build'], env);
   run(
     process.execPath,
     [

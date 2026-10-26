@@ -25,6 +25,12 @@ const {
   UserDateOfBirthSetConsumer,
 } = require('../../dist/loyalty/consumers/user-date-of-birth-set.consumer');
 
+const {
+  CustomerFactsService,
+} = require('../../dist/loyalty/customer-facts.service');
+const {
+  CustomerFactsChangedConsumer,
+} = require('../../dist/loyalty/consumers/customer-facts-changed.consumer');
 const database = new URL(process.env.RMQ_TEST_DATABASE_URL);
 const rabbit = new URL(process.env.RMQ_TEST_RABBIT_URL);
 const queue = process.env.RMQ_TEST_QUEUE;
@@ -36,8 +42,8 @@ if (
   !queue?.startsWith('rmq-test-')
 )
   throw new Error('Worker accepts only its disposable local fixture');
-const notify = (kind) => {
-  if (process.connected) process.send({ kind, at: Date.now() });
+const notify = (kind, evidence = {}) => {
+  if (process.connected) process.send({ kind, at: Date.now(), ...evidence });
 };
 const config = new ConfigService({
   DATABASE_URL: database.toString(),
@@ -58,6 +64,7 @@ const loyalty = new LoyaltyService(
   new LoyaltyCalculatorService(),
   new AchievementsService({}, prisma, new AchievementMapper()),
 );
+const facts = new CustomerFactsService(prisma);
 let workCalls = 0;
 for (const method of ['processTicketPurchase', 'processUserDateOfBirthSet']) {
   const real = loyalty[method].bind(loyalty);
@@ -93,9 +100,11 @@ for (const method of ['processTicketPurchase', 'processUserDateOfBirthSet']) {
 }
 const purchase = new TicketPurchasedConsumer(loyalty, deliveries);
 const dob = new UserDateOfBirthSetConsumer(loyalty, deliveries);
+const customer = new CustomerFactsChangedConsumer(facts, deliveries);
 let connection, channel;
 async function stop() {
   deliveries.onModuleDestroy();
+  await facts.onModuleDestroy();
   if (channel) await channel.close();
   if (connection) await connection.close();
   await prisma.$disconnect();
@@ -116,6 +125,12 @@ void (async () => {
   channel.on('error', () => notify('channel-error'));
   await channel.assertQueue(queue, { durable: true });
   await channel.prefetch(1);
+  if (process.env.RMQ_TEST_ACK_BARRIER === 'true') {
+    // Test-only barrier: an independent DB reader verifies commit before crash.
+    channel.ack = () => {
+      notify('ack-waiting');
+    };
+  }
   if (process.env.RMQ_TEST_LOSE_ACK === 'true') {
     // Real channel/broker. Terminate immediately before writing the first basic.ack.
     channel.ack = () => {
@@ -127,13 +142,21 @@ void (async () => {
     queue,
     (message) => {
       if (!message) return;
-      notify(message.fields.redelivered ? 'redelivered' : 'delivered');
+      notify(message.fields.redelivered ? 'redelivered' : 'delivered', {
+        bodyHash: require('node:crypto')
+          .createHash('sha256')
+          .update(message.content)
+          .digest('hex'),
+        messageId: message.properties.messageId,
+      });
       const packet = JSON.parse(message.content.toString());
       const context = new RmqContext([message, channel, packet.pattern]);
       const handler =
-        packet.pattern === EventPatternType.USER_DATE_OF_BIRTH_SET
-          ? dob
-          : purchase;
+        packet.pattern === EventPatternType.CUSTOMER_FACTS_CHANGED
+          ? customer
+          : packet.pattern === EventPatternType.USER_DATE_OF_BIRTH_SET
+            ? dob
+            : purchase;
       void handler
         .handle(packet.data, context)
         .then(() => notify('handled'))
@@ -144,6 +167,7 @@ void (async () => {
     },
     { noAck: false },
   );
+  await facts.recoverPending();
   notify('ready');
 })().catch(() => {
   notify('worker-failed');
