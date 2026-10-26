@@ -2,6 +2,7 @@
 
 **Change**: `003-authoritative-customer-facts-producer` — Stage 1 / PR 2B
 **Created**: 2026-10-26
+**Revision**: 2 — scope refinement, 2026-10-26
 **Status**: Draft for user review; planning only, implementation not authorized.
 **Target**: Cinema Platform Backend. Loyalty is the SDD root and existing passive consumer.
 **Related change**: [002 / PR 2A](../002-authoritative-customer-facts/spec.md); those artifacts are preserved, not replaced.
@@ -10,7 +11,7 @@
 
 Future personal loyalty years and birthday eligibility need truthful registration and first-DOB instants. The backend currently stores a DOB but neither timestamp, retained customer-fact identity nor revision history. A later message handler cannot reconstruct these facts from delivery time or LoyaltyProfile.createdAt.
 
-PR 2B establishes reliable source facts for registration and first DOB through every existing production entry point. It provides the revision/audit foundation for controlled corrections and exact restaging without adding a public correction API. The already merged reader remains passive. This change does not activate the future economy.
+PR 2B establishes reliable source facts for registration and first DOB through every existing production entry point, durable revision/source history and exact operator restaging. A full internal DOB correction operation is deferred to a separate future PR, including its operation audit and historical command-result behavior. The existing DateOfBirthCorrected v1 wire contract remains supported and unchanged. The already merged reader remains passive. This change does not activate the future economy.
 
 Sources: [master B.3, B.4, D.7, E, F Stage 1, H-3/H-5/H-8/H-11](../../docs/loyalty-economy-architecture-spec.md), [constitution](../../.specify/memory/constitution.md). H-1…H-16 remain approved. Detailed evidence and the fixed reader contract are in [plan.md](plan.md).
 
@@ -50,16 +51,15 @@ Committed facts remain recoverable across broker failure, process failure, dupli
 2. Given a transaction rollback, then no publishable fact from that operation remains.
 3. Given a missing revision, when the stored source revision is explicitly restaged, then its original identity/content is reused; no new source revision is allocated.
 4. Given duplicate or out-of-order delivery, then exact facts deduplicate or wait for predecessors; changed content under the same identity is diagnosed rather than accepted as a new truth.
-5. Given a controlled internal DOB correction, then it requires actor, reason, expected revision and operation identity; old/new date and historical result are retained. Exact replay returns that result, even after later changes. No public correction/clear route is added by this PR.
-6. Given passive facts and the retained initial-DOB legacy event, then new facts alone produce no reward/tier effect; the legacy flow retains its existing business effect and grant dedupe.
+5. Given passive facts and the retained initial-DOB legacy event, then new facts alone produce no reward/tier effect; the legacy flow retains its existing business effect and grant dedupe.
 
 ### Edge cases
 
-UTC/Kyiv midnight, leap dates, sub-millisecond .NET precision, unknown legacy evidence, same-date retries, A→B→A corrections, revision exhaustion, stale Identity tracking, role/password mutations racing DOB, failure after intermediate Identity SaveChanges, ambiguous commit acknowledgement, broker outage and lost consumer ACK.
+UTC/Kyiv midnight, leap dates, sub-millisecond .NET precision, unknown legacy evidence, same-date retries, revision exhaustion, stale Identity tracking, role/password mutations racing DOB, failure after intermediate Identity SaveChanges, ambiguous commit acknowledgement, broker outage and lost consumer ACK.
 
 ## Functional requirements
 
-- **FR-001**: Persist an immutable server-owned registration instant for newly committed accounts, including executable seed paths. Do not assign a historical instant to previously existing accounts.
+- **FR-001**: Persist one stable server-owned UTC millisecond instant of the accepted registration operation, including executable seed paths. It becomes authoritative only after successful commit; it is not the exact physical DB commit timestamp. Do not assign a historical instant to previously existing accounts.
 - **FR-002**: Persist first-DOB time once for an actual first declaration across both handlers; preserve the declared calendar date, current validations and existing public response semantics.
 - **FR-003**: Retain a per-user positive contiguous source revision and globally unique event identity for each accepted fact. Retries and reconstruction from committed history must preserve their contents.
 - **FR-004**: Commit account/required-role changes, source head/history and all related new/legacy delivery records as one local operation. Failed operations cannot leave publishable success facts.
@@ -67,8 +67,10 @@ UTC/Kyiv midnight, leap dates, sub-millisecond .NET precision, unknown legacy ev
 - **FR-006**: Use the existing durable outbox. Broker outage/crash does not lose committed facts; no direct network publication substitutes for the transaction.
 - **FR-007**: Serialize same-user facts writers and guard revision/event uniqueness in persistence. A concurrent losing command cannot publish its uncommitted DOB. Ordinary Identity updates must not overwrite newer facts metadata.
 - **FR-008**: Keep restricted immutable source snapshots sufficient for recovery after transport records are delivered/removed. Provide narrowly controlled restaging by stored event identity; never rebuild business timestamps from current time.
-- **FR-009**: Model controlled corrections with previous/new DOB, original first-set time, authenticated/explicitly authorized actor, reason, expected revision, stable correction operation identity and historical result. Reject identity reuse with changed actor/content; no new public correction API, clearing or financial correction is in scope.
-- **FR-010**: Preserve `USER_DATE_OF_BIRTH_SET` on an accepted first DOB and the existing `UserProfileUpdatedMessage` paths. Stage old/new messages from the same accepted source state; no first-set legacy bonus message on registration, correction or restaging the passive fact.
+
+FR-009 is reserved for the deferred correction operation; it is not a PR 2B requirement (see backlog below).
+
+- **FR-010**: Preserve `USER_DATE_OF_BIRTH_SET` on an accepted first DOB and the existing `UserProfileUpdatedMessage` paths. Stage old/new messages from the same accepted source state; no first-set legacy bonus message on registration or restaging the passive fact; this PR implements no correction writer.
 - **FR-011**: Distinguish source occurrence from publication/receipt. Registration anniversary and birthday calendar calculations remain later stages; unknown facts are not proven ineligibility.
 - **FR-012**: Treat commit acknowledgement loss as ambiguous. Do not blindly rerun a multi-save operation or report proven rollback; inspect committed source state from a fresh scope. Do not log DOB, email, reason, credentials, raw envelopes or private exception payloads.
 - **FR-013**: Deploy all passive readers before enabling producer emissions. Old competing readers on the shared queue must not consume an unsupported pattern.
@@ -80,7 +82,7 @@ UTC/Kyiv midnight, leap dates, sub-millisecond .NET precision, unknown legacy ev
 | FR-001/002/011 | B.3/B.4, H-3/H-5/H-8, I-14/I-19 | Truthful source evidence; personal-year/birthday eligibility itself is not implemented |
 | FR-003/005/007/008 | F Stage 1, I-06/I-14, constitution III/VI | Stable identity/revisions; delivery never invents source time |
 | FR-004/006/012 | I-25/I-26, constitution II–V | Local source/history/outbox atomicity, no external work in retried DB callbacks |
-| FR-009/010 | B.4, H-11, I-22 | Accountable corrections, no new birthday entitlement or accounting effect |
+| FR-010 | B.4, I-22 | Passive facts/restaging create no new birthday entitlement; full correction behavior deferred |
 | FR-005/006/013 | I-28, constitution IV/VI | Existing consumer commit/quarantine-before-ACK is preserved, not reimplemented |
 
 ## Cross-service contract and compatibility requirements
@@ -103,14 +105,19 @@ Rejected input/Identity/concurrency failures return existing Result-based failur
 | AC-04 | DB failures before commit leave user/head/history/outbox unchanged; with production retry configuration the transaction is valid; unknown commit does not trigger duplicate writes | FR-004/007/012 |
 | AC-05 | Real broker outage/restart eventually delivers the same committed fact; manual duplicate and real lost-ACK redelivery are independently evidenced | FR-005/006/008 |
 | AC-06 | Legacy accounts preserve unknown timestamps and existing DOB; no fabricated registration or bulk replay; new first-DOB root is accepted by unchanged reader | FR-001/002/005/011 |
-| AC-07 | Controlled internal correction enforces revision/operation identity and audit, preserves first-set time, rejects clear/no-op/conflict; exact replay returns its historical result | FR-007/009 |
 | AC-08 | Pinned cross-service registration and first-DOB reach contiguous projection; duplicates/order gaps/conflicts follow PR 2A behavior; financial invariants unchanged except retained legacy first-DOB effect | FR-005/010/013 |
-| AC-09 | All source creation/DOB write paths are accounted for, tests/checks documented with actual commands/exits, restricted logs verified and consumer-first rollout documented | FR-001…013 |
+| AC-09 | All source creation/DOB write paths are accounted for, tests/checks documented with actual commands/exits, restricted logs verified and consumer-first rollout documented | Current FR-001…008 and FR-010…013 |
+
+## Deferred backlog — not current acceptance criteria
+
+Original **FR-009 / AC-07** move together to a separate future DOB correction PR: authorized actor/reason, expected revision, operation identity, immutable correction audit, historical result, conflicting replay and A→B→A scenarios. Original task T013 is reserved for that future work. Their IDs are retained for traceability, not renumbered or treated as PR 2B gates. DateOfBirthCorrected and its required v1 fields remain in the wire contract; current type/serialization compatibility must not remove them.
+
+The first implementation slice must prove real PostgreSQL Identity/Bus Outbox transaction wiring with production retry configuration **before** the full source model. Subsequent tests extend that proof to head/history. This is sequencing, not a relaxation of FR-004 or AC-04.
 
 ## Dependencies, exclusions and approval
 
 Requires merged PR 2A (`5ae3ad1` baseline) and existing backend payment-facts/outbox baseline (`f5bb441`). Actual implementation bases must be rechecked. New schema precedes producer; all source writers upgrade together before new mutations are admitted. No automatic rollback to old DOB writers after facts emission.
 
-Excluded: birthday gifts/multipliers/reservations, tiers/personal-year calculation, FEFO/debt, session/refund lifecycle, payment PR 1 reimplementation, auth/role redesign, new services/frameworks/dependencies, public correction API, clear-DOB event, historical backfill, production changes. Database resets are not authorized.
+Excluded: birthday gifts/multipliers/reservations, tiers/personal-year calculation, FEFO/debt, session/refund lifecycle, payment PR 1 reimplementation, auth/role redesign, new services/frameworks/dependencies, internal DOB correction operation, correction audit/command-result store, public correction API, clear-DOB event, historical backfill, production changes. Database resets are not authorized.
 
-No unresolved business decision blocks registration/first-set implementation. Internal correction/replay entry points and transaction mechanism are proposed engineering design subject to this plan's review; support UI/public API and new calendar-policy activation remain separate work. No tests were executed during planning.
+No unresolved business decision blocks registration/first-set implementation. Restaging entry point and transaction mechanism are proposed engineering design subject to this plan's review; internal corrections, support UI/public API and new calendar-policy activation remain separate work. No tests were executed during planning.
