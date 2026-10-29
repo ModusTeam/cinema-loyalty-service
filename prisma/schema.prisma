@@ -8,6 +8,19 @@ datasource db {
   provider = "postgresql"
 }
 
+// Passive source fact: no profile relation or financial effects.
+model SessionCompletionFact {
+  eventId        String   @id @map("event_id") @db.Uuid
+  sessionId      String   @map("session_id") @db.Uuid
+  schemaVersion  Int      @map("schema_version")
+  revision       Int
+  completedAtUtc String   @map("completed_at_utc") @db.VarChar(27)
+  receivedAt     DateTime @default(now()) @map("received_at") @db.Timestamptz()
+
+  @@unique([sessionId, revision])
+  @@map("session_completion_facts")
+}
+
 // Transport retry budget; business idempotency remains in processed_events/grants.
 // Quarantine bytes contain the original private event and require restricted access.
 model InboundDelivery {

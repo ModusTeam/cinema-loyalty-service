@@ -139,3 +139,55 @@ Local bun run test:integration and bun run test:rmq cover receipt/projection
 transactions, gaps, controlled overlaps, restart and real broker lost-ACK
 redelivery. Cross-service registration/first-DOB/correction E2E still requires PR B
 and clean pinned commits in both repositories.
+
+### Passive session completion v1
+
+`SESSION_COMPLETED` uses the existing inbound `RMQ_QUEUE` (normally
+`loyalty_ticket_purchased`), durable declaration, manual ACK, retry budget and
+restricted durable quarantine. It creates no new queue or broker policy.
+The raw JSON envelope is `{ "pattern": "SESSION_COMPLETED", "data": { ... } }`.
+Required data: `schemaVersion: 1`, canonical UUID `eventId` and `sessionId`,
+`revision: 1`, and a real canonical UTC `completedAtUtc` string with exactly six
+fractional digits. Years 0001–9999 are accepted. There is no user/order identity.
+
+Migration `20261029010000_passive_session_completion` creates one independent
+`session_completion_facts` table. It retains all canonical fact fields and the
+first receipt time. PostgreSQL enforces event identity and unique
+`(sessionId, revision)`. The service inserts or reads facts; it never updates a
+previously accepted fact. Semantic duplicates (including key order/UUID case)
+are successful no-ops. Reusing either identity with changed canonical content,
+including a different eventId for the same session/revision, is a permanent
+`SESSION_COMPLETION_IDENTITY_CONFLICT`. Invalid or future-version/revision input
+is `INVALID_SESSION_COMPLETION`. Both use the existing quarantine flow; original
+evidence remains intact. Unknown metadata is stripped from the business fact.
+
+`completedAtUtc` stays VARCHAR text: PostgreSQL microseconds must not be rounded
+through JavaScript Date when storing or comparing facts. `receivedAt` is local
+transport metadata, never a substitute for completion time. The receipt is also
+the minimal v1 completion projection; no mutable projection, revision-gap
+scheduler, profile relation or purchase projection is introduced. Completion can
+arrive before purchases. Ingestion does not create LoyaltyProfile or change
+balance, ledger, dedupe records for purchases, tier, GOLD, birthday grants,
+achievements or outbox/intents. Current purchase reward behavior is unchanged.
+
+Deploy this additive schema and the reader to **all** replicas before the backend
+emits the new pattern. Backend completion/worker/source snapshot is a separate
+PR. Its replay must retain the original eventId/content. Quarantine replay uses
+the existing reviewed procedure; republishing a changed payload under an existing
+identity cannot repair a conflict. This release supports neither corrections nor
+revision > 1. Coordinate future producer/consumer upgrades before enabling them.
+
+Fixed cross-language fixtures are in `test/fixtures/session-completed-v1.json`.
+Verify the proposed BCL-only .NET serializer without rewriting fixtures:
+
+```powershell
+dotnet run --project test/fixtures/session-completed-dotnet/SessionCompletedFixtures.csproj --artifacts-path .tmp/session-completed-dotnet -- test/fixtures/session-completed-v1.json
+```
+
+The optional fixture check requires .NET 10; the service runtime remains Node.js
+22 with Bun 1.3.13/Jest. Unit tests validate the fixed fixtures with the actual
+Zod DTO. `bun run test:integration` covers real PostgreSQL identity races,
+rollback, precise timestamps and zero financial effects. `bun run test:rmq`
+starts real Nest RMQ microservices against disposable PostgreSQL/RabbitMQ,
+covering the fixed envelopes, two replicas, quarantine, DB retry and a killed
+consumer after business commit before ACK, with broker redelivery evidence.

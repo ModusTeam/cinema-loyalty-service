@@ -296,6 +296,7 @@ separate coordinator responsibility.
 | --- | --- | --- | --- |
 | `loyalty_ticket_purchased` | inbound | `TicketPurchasedConsumer` | Processes checkout completion |
 | user date of birth event | inbound | DOB consumer | Stores birthday date and may grant birthday bonus |
+| `SESSION_COMPLETED` | inbound | `SessionCompletedConsumer` | Stores a passive session fact; no rewards or profile changes |
 | `loyalty.tier_upgraded` | outbound | outbox publisher | Notifies platform about tier upgrades |
 | `loyalty.points_expiring` | outbound | outbox publisher | Notifies platform about soon-to-expire points |
 

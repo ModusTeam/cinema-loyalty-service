@@ -25,6 +25,8 @@ import { OutboxPublisherService } from './outbox-publisher.service';
 import { AchievementsModule } from 'src/achievements/achievements.module';
 import { AdminLoyaltyService } from './admin-loyalty.service';
 import { RmqDeliveryService } from './consumers/rmq-delivery.service';
+import { SessionCompletionService } from './session-completion.service';
+import { SessionCompletedConsumer } from './consumers/session-completed.consumer';
 
 @Module({
   imports: [
@@ -54,12 +56,14 @@ import { RmqDeliveryService } from './consumers/rmq-delivery.service';
   controllers: [
     LoyaltyController,
     CustomerFactsChangedConsumer,
+    SessionCompletedConsumer,
     TicketPurchasedConsumer,
     UserDateOfBirthSetConsumer,
   ],
   providers: [
     LoyaltyService,
     CustomerFactsService,
+    SessionCompletionService,
     LoyaltyExpirationService,
     LoyaltySchedulerProducer,
     LoyaltyQueueProcessor,

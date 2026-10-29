@@ -13,7 +13,8 @@ import { classifyMessageFailure } from './message-failure';
 type Operation =
   | 'TicketPurchased'
   | 'UserDateOfBirthSet'
-  | 'CustomerFactsChanged';
+  | 'CustomerFactsChanged'
+  | 'SessionCompleted';
 interface DeliveryState {
   id: string;
   attempts: number;
@@ -38,7 +39,7 @@ export function inboundDeliveryId(queue: string, body: Buffer): string {
 function correlation(data: unknown): Record<string, string> {
   if (typeof data !== 'object' || data === null) return {};
   const result: Record<string, string> = {};
-  for (const key of ['eventId', 'orderId', 'userId']) {
+  for (const key of ['eventId', 'orderId', 'userId', 'sessionId']) {
     const value: unknown = Reflect.get(data, key);
     if (
       typeof value === 'string' &&
