@@ -331,6 +331,7 @@ model PointRedemption {
   userId       String   @map("user_id") @db.Uuid
   redemptionId String   @map("redemption_id") @db.Uuid
   debitRef     String   @map("debit_ref") @db.Uuid
+  funded       Int      @default(0)
   amount       Int
   spentAt      DateTime @map("spent_at") @db.Timestamptz(3)
   funding      PointFunding[]

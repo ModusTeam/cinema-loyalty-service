@@ -607,4 +607,41 @@ describe('points allocation on PostgreSQL', () => {
     expect(result.funding).toHaveLength(1);
     expect(result.funding[0].amount).toBe(2147483647);
   });
+  it('maintains funding totals across many splits and rejects direct counter changes', async () => {
+    const redemptionId = randomUUID();
+    await prisma.$transaction(
+      async (tx) => {
+        for (let i = 0; i < 64; i++)
+          await issuePointsSource(tx, {
+            userId,
+            sourceId: randomUUID(),
+            sourceRef: `batch-${i}`,
+            amount: 1,
+            issuedAt,
+            originalExpiresAt: expiresAt,
+          });
+        const result = await redeemPoints(tx, {
+          userId,
+          redemptionId,
+          debitRef: randomUUID(),
+          amount: 64,
+        });
+        expect(result.funding).toHaveLength(64);
+      },
+      { timeout: 30000 },
+    );
+    const rows = await prisma.$queryRaw<
+      Array<{ funded: number; amount: number }>
+    >`SELECT funded, amount FROM point_redemptions WHERE user_id = ${userId}::uuid`;
+    expect(rows).toEqual([{ funded: 64, amount: 64 }]);
+    await expect(
+      prisma.$executeRaw`UPDATE point_redemptions SET funded = 0 WHERE user_id = ${userId}::uuid`,
+    ).rejects.toThrow();
+    await expect(
+      prisma.$executeRaw`INSERT INTO point_redemptions (user_id, redemption_id, debit_ref, amount, spent_at, funded) VALUES (${userId}::uuid, ${randomUUID()}::uuid, ${randomUUID()}::uuid, 1, ${now}, 1)`,
+    ).rejects.toThrow();
+    expect(
+      await prisma.pointFunding.count({ where: { userId, redemptionId } }),
+    ).toBe(64);
+  });
 });
