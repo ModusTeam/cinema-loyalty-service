@@ -309,3 +309,46 @@ model CustomerFactReceipt {
   @@unique([userId, revision])
   @@map("customer_fact_receipts")
 }
+
+// Dormant source accounting; independent of the legacy balance projection.
+model PointSource {
+  userId            String   @map("user_id") @db.Uuid
+  sourceId          String   @map("source_id") @db.Uuid
+  sourceRef         String   @map("source_ref") @db.VarChar(128)
+  granted           Int
+  remaining         Int
+  issuedAt          DateTime @map("issued_at") @db.Timestamptz(3)
+  originalExpiresAt DateTime @map("original_expires_at") @db.Timestamptz(3)
+  funding           PointFunding[]
+
+  @@id([userId, sourceId])
+  @@unique([userId, sourceRef])
+  @@index([userId, originalExpiresAt, sourceId])
+  @@map("point_sources")
+}
+
+model PointRedemption {
+  userId       String   @map("user_id") @db.Uuid
+  redemptionId String   @map("redemption_id") @db.Uuid
+  debitRef     String   @map("debit_ref") @db.Uuid
+  amount       Int
+  spentAt      DateTime @map("spent_at") @db.Timestamptz(3)
+  funding      PointFunding[]
+
+  @@id([userId, redemptionId])
+  @@unique([userId, debitRef])
+  @@map("point_redemptions")
+}
+
+model PointFunding {
+  userId       String @map("user_id") @db.Uuid
+  redemptionId String @map("redemption_id") @db.Uuid
+  sourceId     String @map("source_id") @db.Uuid
+  amount       Int
+  source       PointSource @relation(fields: [userId, sourceId], references: [userId, sourceId], onDelete: Restrict)
+  redemption   PointRedemption @relation(fields: [userId, redemptionId], references: [userId, redemptionId], onDelete: Restrict)
+
+  @@id([userId, redemptionId, sourceId])
+  @@index([userId, sourceId])
+  @@map("point_funding")
+}
