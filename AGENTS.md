@@ -46,3 +46,13 @@
 - Distinguish confirmed defects from hypothetical risks. Highlight trade-offs and production limitations; do not claim exactly-once delivery.
 - No automatic commit, push, production deployment, secret changes, or destructive database operations unless the user specifically requests them.
 - Final response in Ukrainian: what changed, why, risks, test evidence, remaining work.
+
+## Pull request descriptions
+
+- Write for a reviewer who has not seen the conversation. Lead with the concrete problem and resulting behavior.
+- Use a Conventional Commit-style title and concise sections: problem/result, changes, verification, and relevant limitations or rollout requirements. Omit sections that add no useful information.
+- Explain important invariants and compatibility consequences in plain language. Include actual test commands/results and distinguish local checks from CI on the current HEAD.
+- Describe the final patch, not the sequence of agent actions, previous drafts, or repeated audit reports. Keep detailed execution logs in chat or linked CI runs.
+- Use normal sentence case; avoid all-caps status paragraphs, excessive emphasis, unexplained abbreviations, and long lists of unrelated exclusions. Keep necessary identifiers such as GOLD unchanged.
+- Preserve real Markdown newlines and blank lines around headings/lists. With PowerShell, decode `gh --json body` as JSON to obtain one string; do not implicitly cast multiline CLI output arrays to a string. Submit descriptions using `--body-file` and read them back from GitHub to verify formatting.
+- Keep the description current after changes. Report pending or skipped checks honestly; never claim a fresh review or successful CI from an earlier commit.
