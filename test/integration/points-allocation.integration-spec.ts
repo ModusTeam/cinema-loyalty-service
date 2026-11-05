@@ -8,6 +8,7 @@ import {
   it,
 } from '@jest/globals';
 import { Pool } from 'pg';
+import { ZodError } from 'zod';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { issuePointsSource, redeemPoints } from 'src/loyalty/points-allocation';
@@ -81,7 +82,7 @@ describe('points allocation on PostgreSQL', () => {
       { sourceId: b, amount: 20 },
     ]);
   });
-  it('uses source UUID as the stable tie breaker and excludes expired sources at the exact boundary', async () => {
+  it('uses source UUID as the stable tie breaker and excludes expired sources', async () => {
     const ids = [randomUUID(), randomUUID()].sort();
     await prisma.$transaction(async (tx) => {
       for (const id of [...ids].reverse())
@@ -269,9 +270,9 @@ describe('points allocation on PostgreSQL', () => {
     } finally {
       await blocker.query('ROLLBACK');
       blocker.release();
+      await pool.end();
     }
     const settled = await results;
-    await pool.end();
     expect(
       settled.filter((result) => result.status === 'fulfilled'),
     ).toHaveLength(1);
@@ -293,12 +294,21 @@ describe('points allocation on PostgreSQL', () => {
       issuedAt,
       originalExpiresAt: expiresAt,
     };
+    await prisma.$transaction(async (tx) => {
+      await issuePointsSource(tx, source);
+      await issuePointsSource(tx, {
+        ...source,
+        sourceId: randomUUID(),
+        sourceRef: 'extra',
+        originalExpiresAt: new Date(expiresAt.getTime() + 86400000),
+      });
+    });
     for (const value of [0, -1, 1.5, NaN, Infinity, 2147483648]) {
       await expect(
         prisma.$transaction((tx) =>
           issuePointsSource(tx, { ...source, amount: value }),
         ),
-      ).rejects.toThrow();
+      ).rejects.toBeInstanceOf(ZodError);
       await expect(
         prisma.$transaction((tx) =>
           redeemPoints(tx, {
@@ -308,7 +318,7 @@ describe('points allocation on PostgreSQL', () => {
             amount: value,
           }),
         ),
-      ).rejects.toThrow();
+      ).rejects.toBeInstanceOf(ZodError);
     }
     await prisma.$transaction((tx) => issuePointsSource(tx, source));
     expect(
@@ -337,6 +347,9 @@ describe('points allocation on PostgreSQL', () => {
         originalExpiresAt: expiresAt,
       }),
     );
+    await expect(
+      prisma.$executeRaw`UPDATE point_sources SET source_ref = 'changed' WHERE user_id = ${userId}::uuid AND source_id = ${sourceId}::uuid`,
+    ).rejects.toThrow('point allocation facts are immutable');
     await expect(
       prisma.$executeRaw`UPDATE point_sources SET remaining = 11 WHERE user_id = ${userId}::uuid AND source_id = ${sourceId}::uuid`,
     ).rejects.toThrow();
@@ -389,7 +402,7 @@ describe('points allocation on PostgreSQL', () => {
     const [clock] = await prisma.$queryRaw<
       Array<{ currentTime: Date }>
     >`SELECT clock_timestamp()::timestamptz(3) AS "currentTime"`;
-    const deadline = new Date(clock.currentTime.getTime() + 1500);
+    const deadline = new Date(clock.currentTime.getTime() + 5000);
     await prisma.$transaction((tx) =>
       issuePointsSource(tx, {
         userId,
@@ -406,8 +419,9 @@ describe('points allocation on PostgreSQL', () => {
       debitRef: randomUUID(),
       amount: 10,
     };
+    expect(Date.now()).toBeLessThan(deadline.getTime());
     const first = await prisma.$transaction((tx) => redeemPoints(tx, debit));
-    await prisma.$executeRaw`SELECT pg_sleep(2)`;
+    await prisma.$executeRaw`SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM (${deadline}::timestamptz - clock_timestamp()))) + 0.01)`;
     expect(await prisma.$transaction((tx) => redeemPoints(tx, debit))).toEqual(
       first,
     );
@@ -433,7 +447,20 @@ describe('points allocation on PostgreSQL', () => {
         originalExpiresAt: expiresAt,
       }),
     );
-    await expect(redeemPoints(prisma, command)).rejects.toThrow();
+    await expect(redeemPoints(prisma, command)).rejects.toThrow(
+      'Interactive transaction required',
+    );
+    await expect(
+      issuePointsSource(prisma, {
+        userId,
+        sourceId: randomUUID(),
+        sourceRef: 'autocommit',
+        amount: 10,
+        issuedAt,
+        originalExpiresAt: expiresAt,
+      }),
+    ).rejects.toThrow('Interactive transaction required');
+    expect(await prisma.pointSource.count({ where: { userId } })).toBe(1);
     const rows = await prisma.$queryRaw<
       Array<{ remaining: number }>
     >`SELECT remaining FROM point_sources WHERE user_id = ${userId}::uuid`;
@@ -464,7 +491,7 @@ describe('points allocation on PostgreSQL', () => {
     const [clock] = await prisma.$queryRaw<
       Array<{ currentTime: Date }>
     >`SELECT clock_timestamp()::timestamptz(3) AS "currentTime"`;
-    const deadline = new Date(clock.currentTime.getTime() + 1200);
+    const deadline = new Date(clock.currentTime.getTime() + 5000);
     await prisma.$transaction((tx) =>
       issuePointsSource(tx, {
         userId,
@@ -484,6 +511,7 @@ describe('points allocation on PostgreSQL', () => {
       'SELECT id FROM loyalty_profiles WHERE user_id = $1 FOR UPDATE',
       [userId],
     );
+    expect(Date.now()).toBeLessThan(deadline.getTime());
     const operation = prisma.$transaction(
       (tx) =>
         redeemPoints(tx, {
@@ -507,18 +535,53 @@ describe('points allocation on PostgreSQL', () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(waiting).toBeGreaterThan(0);
-      await blocker.query('SELECT pg_sleep(1.5)');
+      expect(Date.now()).toBeLessThan(deadline.getTime());
+      await blocker.query(
+        'SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp()))) + 0.01)',
+        [deadline],
+      );
     } finally {
       await blocker.query('ROLLBACK');
       blocker.release();
+      await pool.end();
     }
     const [result] = await outcome;
-    await pool.end();
     expect(result.status).toBe('rejected');
     if (result.status === 'rejected')
       expect(result.reason).toEqual(
         expect.objectContaining({ message: 'Insufficient allocated points' }),
       );
+  });
+
+  it('ignores future-issued sources even when they expire first', async () => {
+    const current = randomUUID();
+    await prisma.$transaction(async (tx) => {
+      await issuePointsSource(tx, {
+        userId,
+        sourceId: current,
+        sourceRef: 'current',
+        amount: 10,
+        issuedAt,
+        originalExpiresAt: new Date(expiresAt.getTime() + 86400000),
+      });
+      await issuePointsSource(tx, {
+        userId,
+        sourceId: randomUUID(),
+        sourceRef: 'future',
+        amount: 10,
+        issuedAt: new Date(expiresAt.getTime() - 3600000),
+        originalExpiresAt: expiresAt,
+      });
+    });
+    const result = await prisma.$transaction((tx) =>
+      redeemPoints(tx, {
+        userId,
+        redemptionId: randomUUID(),
+        debitRef: randomUUID(),
+        amount: 10,
+      }),
+    );
+    expect(result.funding).toEqual([{ sourceId: current, amount: 10 }]);
   });
 
   it('handles total source availability above the int32 limit without overflow', async () => {

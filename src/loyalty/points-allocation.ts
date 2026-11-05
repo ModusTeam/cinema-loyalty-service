@@ -44,6 +44,10 @@ async function lockProfile(
 ): Promise<void> {
   if (!(await lockLoyaltyProfile(tx, userId)))
     throw new Error('Loyalty profile not found');
+  const [context] = await tx.$queryRaw<
+    Array<{ active: boolean }>
+  >`SELECT txid_current_if_assigned() IS NOT NULL AS active`;
+  if (!context.active) throw new Error('Interactive transaction required');
 }
 
 export async function issuePointsSource(
