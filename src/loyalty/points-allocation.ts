@@ -49,6 +49,7 @@ type RedemptionRow = { debitRef: string; amount: number };
 
 // These operations require the caller's transaction. They deliberately do not
 // modify the legacy balance, ledger, command keys, or any external service.
+/** Requires a live caller transaction so the profile lock survives subsequent writes. */
 async function lockProfile(
   tx: Prisma.TransactionClient,
   userId: string,
@@ -61,6 +62,11 @@ async function lockProfile(
   if (!context.active) throw new Error('Interactive transaction required');
 }
 
+/**
+ * Registers trusted issuance facts in the caller transaction without deriving
+ * historical provenance or recalculating expiry. Reusing an identity requires
+ * the same original source facts, even after that source has been spent.
+ */
 export async function issuePointsSource(
   tx: Prisma.TransactionClient,
   input: IssuePointsSource,
@@ -93,6 +99,11 @@ export async function issuePointsSource(
       ${command.amount}, ${command.amount}, ${command.issuedAt}, ${command.originalExpiresAt})`;
 }
 
+/**
+ * Spends currently eligible source buckets in effective-expiry/UUID order.
+ * Requires the caller interactive transaction; decision time is read after the
+ * profile lock. Exact replay returns saved funding even after its expiry.
+ */
 export async function redeemPoints(
   tx: Prisma.TransactionClient,
   input: RedeemPoints,
@@ -171,6 +182,12 @@ export async function redeemPoints(
   };
 }
 
+/**
+ * Restores the full persisted debit in the caller interactive transaction.
+ * Original funding stays immutable; one saved source extension governs all
+ * post-expiry returns. Replay returns the original snapshot without recrediting
+ * points or recomputing deadlines, including deadlines that have now expired.
+ */
 export async function restorePoints(
   tx: Prisma.TransactionClient,
   input: RestorePoints,
@@ -236,6 +253,7 @@ export async function restorePoints(
   return restorationSnapshot(tx, command, redemption.amount, clock.restoredAt);
 }
 
+/** Returns immutable replay facts; an expired deadline is not renewed here. */
 async function restorationSnapshot(
   tx: Prisma.TransactionClient,
   command: RestorePoints,

@@ -15,6 +15,7 @@ const originalExpiry = new Date('2026-03-01T10:00:00Z');
 const issuance = new Date('2026-01-01T10:00:00Z');
 const beforeExpiry = new Date('2026-02-01T10:00:00Z');
 const afterExpiry = new Date('2026-03-01T10:00:00Z');
+/** Installs a controlled DB clock only after verifying the isolated fixture target. */
 beforeAll(async () => {
   const url = process.env.INTEGRATION_DATABASE_URL;
   if (!url) throw new Error('Run through bun run test:integration');
@@ -42,6 +43,7 @@ beforeEach(async () => {
   });
   await prisma.$executeRaw`INSERT INTO points_test_clock VALUES (${beforeExpiry})`;
 });
+/** Restores the production clock function so later suites cannot inherit test time. */
 afterAll(async () => {
   if (prisma) {
     await prisma.$executeRawUnsafe(
@@ -54,6 +56,7 @@ afterAll(async () => {
 async function at(date: Date) {
   await prisma.$executeRaw`UPDATE points_test_clock SET now = ${date} WHERE true`;
 }
+/** Creates trusted fixture source facts inside the same transaction used by production helpers. */
 async function source(amount = 100, expiry = originalExpiry) {
   const sourceId = randomUUID();
   await prisma.$transaction((tx) =>
@@ -84,6 +87,7 @@ function restoration(redemptionId: string) {
 async function restore(command: ReturnType<typeof restoration>) {
   return prisma.$transaction((tx) => restorePoints(tx, command));
 }
+/** Reads accounting remainders; expired amounts here are not necessarily spendable. */
 async function balances() {
   return prisma.$queryRaw<
     Array<{ remaining: number; extendedRemaining: number }>
@@ -488,6 +492,11 @@ it('does not select a future extension when another original source can fund the
   expect(saved.funding).toEqual([{ sourceId: valid, amount: 10 }]);
 });
 
+/**
+ * Holds the real profile row until every operation is observed waiting in
+ * pg_stat_activity. The optional callback changes fixture time while writes
+ * remain blocked; cleanup releases the lock and closes its independent pool.
+ */
 async function blockedOperations(
   operations: Array<() => Promise<unknown>>,
   whileBlocked?: () => Promise<void>,
