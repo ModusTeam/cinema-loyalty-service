@@ -20,10 +20,21 @@ const redemptionSchema = z.object({
   debitRef: uuid,
   amount,
 });
+const restorationSchema = z.object({
+  userId: uuid,
+  restorationId: uuid,
+  redemptionId: uuid,
+});
 export type IssuePointsSource = z.input<typeof sourceSchema>;
 export type RedeemPoints = z.input<typeof redemptionSchema>;
+export type RestorePoints = z.input<typeof restorationSchema>;
 export interface RedemptionResult {
   funding: Array<{ sourceId: string; amount: number }>;
+}
+export interface RestorationResult {
+  amount: number;
+  restoredAt: Date;
+  funding: Array<{ sourceId: string; amount: number; expiresAt: Date }>;
 }
 
 type SourceRow = {
@@ -101,8 +112,10 @@ export async function redeemPoints(
         Array<{ sourceId: string; amount: number }>
       >`SELECT f.source_id AS "sourceId", f.amount FROM point_funding f
         JOIN point_sources s ON s.user_id = f.user_id AND s.source_id = f.source_id
+        JOIN point_redemptions r ON r.user_id = f.user_id AND r.redemption_id = f.redemption_id
+        LEFT JOIN point_source_extensions e ON e.user_id = s.user_id AND e.source_id = s.source_id
         WHERE f.user_id = ${command.userId}::uuid AND f.redemption_id = ${command.redemptionId}::uuid
-        ORDER BY s.original_expires_at, s.source_id`,
+        ORDER BY CASE WHEN r.spent_at < s.original_expires_at THEN s.original_expires_at ELSE e.expires_at END, s.source_id`,
     };
   }
   const duplicateDebit = await tx.$queryRaw<
@@ -113,20 +126,32 @@ export async function redeemPoints(
     throw new Error('Point redemption identity conflict');
   const [clock] = await tx.$queryRaw<
     Array<{ spentAt: Date }>
-  >`SELECT clock_timestamp()::timestamptz(3) AS "spentAt"`;
+  >`SELECT points_decision_time() AS "spentAt"`;
   const sources = await tx.$queryRaw<
-    SourceRow[]
-  >`SELECT source_id AS "sourceId", source_ref AS "sourceRef", granted, remaining,
-      issued_at AS "issuedAt", original_expires_at AS "originalExpiresAt"
-    FROM point_sources
-    WHERE user_id = ${command.userId}::uuid AND remaining > 0
-      AND issued_at <= ${clock.spentAt} AND original_expires_at > ${clock.spentAt}
-    ORDER BY original_expires_at, source_id`;
+    Array<{ sourceId: string; available: number; extended: boolean }>
+  >`SELECT s.source_id AS "sourceId",
+      CASE WHEN s.original_expires_at > ${clock.spentAt} THEN s.remaining ELSE s.extended_remaining END AS available,
+      s.original_expires_at <= ${clock.spentAt} AS extended
+    FROM point_sources s
+    LEFT JOIN point_source_extensions e ON e.user_id = s.user_id AND e.source_id = s.source_id
+    WHERE s.user_id = ${command.userId}::uuid AND s.issued_at <= ${clock.spentAt}
+      AND ((s.original_expires_at > ${clock.spentAt} AND s.remaining > 0)
+        OR (s.original_expires_at <= ${clock.spentAt} AND s.extended_remaining > 0
+          AND e.opened_at <= ${clock.spentAt} AND e.expires_at > ${clock.spentAt}))
+    ORDER BY CASE WHEN s.original_expires_at > ${clock.spentAt} THEN s.original_expires_at ELSE e.expires_at END, s.source_id`;
   let needed = command.amount;
-  const funding: RedemptionResult['funding'] = [];
+  const funding: Array<{
+    sourceId: string;
+    amount: number;
+    extendedAmount: number;
+  }> = [];
   for (const source of sources) {
-    const consumed = Math.min(source.remaining, needed);
-    funding.push({ sourceId: source.sourceId, amount: consumed });
+    const consumed = Math.min(source.available, needed);
+    funding.push({
+      sourceId: source.sourceId,
+      amount: consumed,
+      extendedAmount: source.extended ? consumed : 0,
+    });
     needed -= consumed;
     if (needed === 0) break;
   }
@@ -135,10 +160,91 @@ export async function redeemPoints(
     VALUES (${command.userId}::uuid, ${command.redemptionId}::uuid,
       ${command.debitRef}::uuid, ${command.amount}, ${clock.spentAt})`;
   for (const split of funding) {
-    await tx.$executeRaw`UPDATE point_sources SET remaining = remaining - ${split.amount}
+    await tx.$executeRaw`UPDATE point_sources SET remaining = remaining - ${split.amount},
+      extended_remaining = extended_remaining - ${split.extendedAmount}
       WHERE user_id = ${command.userId}::uuid AND source_id = ${split.sourceId}::uuid`;
-    await tx.$executeRaw`INSERT INTO point_funding (user_id, redemption_id, source_id, amount)
-      VALUES (${command.userId}::uuid, ${command.redemptionId}::uuid, ${split.sourceId}::uuid, ${split.amount})`;
+    await tx.$executeRaw`INSERT INTO point_funding (user_id, redemption_id, source_id, amount, extended_amount)
+      VALUES (${command.userId}::uuid, ${command.redemptionId}::uuid, ${split.sourceId}::uuid, ${split.amount}, ${split.extendedAmount})`;
   }
-  return { funding };
+  return {
+    funding: funding.map(({ sourceId, amount }) => ({ sourceId, amount })),
+  };
+}
+
+export async function restorePoints(
+  tx: Prisma.TransactionClient,
+  input: RestorePoints,
+): Promise<RestorationResult> {
+  const command = restorationSchema.parse(input);
+  await lockProfile(tx, command.userId);
+  const existing = await tx.$queryRaw<
+    Array<{
+      restorationId: string;
+      redemptionId: string;
+      amount: number;
+      restoredAt: Date;
+    }>
+  >`
+    SELECT restoration_id AS "restorationId", redemption_id AS "redemptionId", amount, restored_at AS "restoredAt"
+    FROM point_restorations WHERE user_id = ${command.userId}::uuid
+      AND (restoration_id = ${command.restorationId}::uuid OR redemption_id = ${command.redemptionId}::uuid)`;
+  if (existing.length) {
+    const saved = existing[0];
+    if (
+      existing.length !== 1 ||
+      saved.restorationId !== command.restorationId ||
+      saved.redemptionId !== command.redemptionId
+    )
+      throw new Error('Point restoration identity conflict');
+    return restorationSnapshot(tx, command, saved.amount, saved.restoredAt);
+  }
+  const [redemption] = await tx.$queryRaw<Array<{ amount: number }>>`
+    SELECT amount FROM point_redemptions WHERE user_id = ${command.userId}::uuid AND redemption_id = ${command.redemptionId}::uuid`;
+  if (!redemption) throw new Error('Point redemption not found');
+  const [clock] = await tx.$queryRaw<
+    Array<{ restoredAt: Date }>
+  >`SELECT points_decision_time() AS "restoredAt"`;
+  await tx.$executeRaw`INSERT INTO point_restorations (user_id, restoration_id, redemption_id, amount, restored_at)
+    VALUES (${command.userId}::uuid, ${command.restorationId}::uuid, ${command.redemptionId}::uuid, ${redemption.amount}, ${clock.restoredAt})`;
+  const funding = await tx.$queryRaw<
+    Array<{ sourceId: string; amount: number; originalExpiresAt: Date }>
+  >`
+    SELECT f.source_id AS "sourceId", f.amount, s.original_expires_at AS "originalExpiresAt"
+    FROM point_funding f JOIN point_sources s USING (user_id, source_id)
+    WHERE f.user_id = ${command.userId}::uuid AND f.redemption_id = ${command.redemptionId}::uuid
+    ORDER BY s.source_id`;
+  for (const split of funding) {
+    const afterExpiry = clock.restoredAt >= split.originalExpiresAt;
+    let expiresAt = split.originalExpiresAt;
+    if (afterExpiry) {
+      await tx.$executeRaw`INSERT INTO point_source_extensions (user_id, source_id, restoration_id, opened_at, expires_at)
+        VALUES (${command.userId}::uuid, ${split.sourceId}::uuid, ${command.restorationId}::uuid,
+          ${clock.restoredAt}, point_extension_deadline(${clock.restoredAt}::timestamptz))
+        ON CONFLICT (user_id, source_id) DO NOTHING`;
+      const [extension] = await tx.$queryRaw<Array<{ expiresAt: Date }>>`
+        SELECT expires_at AS "expiresAt" FROM point_source_extensions
+        WHERE user_id = ${command.userId}::uuid AND source_id = ${split.sourceId}::uuid`;
+      expiresAt = extension.expiresAt;
+    }
+    await tx.$executeRaw`UPDATE point_sources SET remaining = remaining + ${split.amount},
+      extended_remaining = extended_remaining + ${afterExpiry ? split.amount : 0}
+      WHERE user_id = ${command.userId}::uuid AND source_id = ${split.sourceId}::uuid`;
+    await tx.$executeRaw`INSERT INTO point_restoration_splits (user_id, restoration_id, redemption_id, source_id, amount, expires_at)
+      VALUES (${command.userId}::uuid, ${command.restorationId}::uuid, ${command.redemptionId}::uuid,
+        ${split.sourceId}::uuid, ${split.amount}, ${expiresAt})`;
+  }
+  return restorationSnapshot(tx, command, redemption.amount, clock.restoredAt);
+}
+
+async function restorationSnapshot(
+  tx: Prisma.TransactionClient,
+  command: RestorePoints,
+  amount: number,
+  restoredAt: Date,
+): Promise<RestorationResult> {
+  const funding = await tx.$queryRaw<RestorationResult['funding']>`
+    SELECT source_id AS "sourceId", amount, expires_at AS "expiresAt" FROM point_restoration_splits
+    WHERE user_id = ${command.userId}::uuid AND restoration_id = ${command.restorationId}::uuid
+    ORDER BY expires_at, source_id`;
+  return { amount, restoredAt, funding };
 }

@@ -312,14 +312,20 @@ model CustomerFactReceipt {
 
 // Dormant source accounting; independent of the legacy balance projection.
 model PointSource {
-  userId            String   @map("user_id") @db.Uuid
-  sourceId          String   @map("source_id") @db.Uuid
-  sourceRef         String   @map("source_ref") @db.VarChar(128)
+  userId            String                @map("user_id") @db.Uuid
+  sourceId          String                @map("source_id") @db.Uuid
+  sourceRef         String                @map("source_ref") @db.VarChar(128)
   granted           Int
   remaining         Int
-  issuedAt          DateTime @map("issued_at") @db.Timestamptz(3)
-  originalExpiresAt DateTime @map("original_expires_at") @db.Timestamptz(3)
+  extendedRemaining Int                   @default(0) @map("extended_remaining")
+  spent             BigInt                @default(0)
+  restored          BigInt                @default(0)
+  extendedSpent     BigInt                @default(0) @map("extended_spent")
+  extendedRestored  BigInt                @default(0) @map("extended_restored")
+  issuedAt          DateTime              @map("issued_at") @db.Timestamptz(3)
+  originalExpiresAt DateTime              @map("original_expires_at") @db.Timestamptz(3)
   funding           PointFunding[]
+  extension         PointSourceExtension?
 
   @@id([userId, sourceId])
   @@unique([userId, sourceRef])
@@ -328,13 +334,14 @@ model PointSource {
 }
 
 model PointRedemption {
-  userId       String   @map("user_id") @db.Uuid
-  redemptionId String   @map("redemption_id") @db.Uuid
-  debitRef     String   @map("debit_ref") @db.Uuid
-  funded       Int      @default(0)
+  userId       String            @map("user_id") @db.Uuid
+  redemptionId String            @map("redemption_id") @db.Uuid
+  debitRef     String            @map("debit_ref") @db.Uuid
+  funded       Int               @default(0)
   amount       Int
-  spentAt      DateTime @map("spent_at") @db.Timestamptz(3)
+  spentAt      DateTime          @map("spent_at") @db.Timestamptz(3)
   funding      PointFunding[]
+  restoration  PointRestoration?
 
   @@id([userId, redemptionId])
   @@unique([userId, debitRef])
@@ -342,14 +349,63 @@ model PointRedemption {
 }
 
 model PointFunding {
-  userId       String @map("user_id") @db.Uuid
-  redemptionId String @map("redemption_id") @db.Uuid
-  sourceId     String @map("source_id") @db.Uuid
-  amount       Int
-  source       PointSource @relation(fields: [userId, sourceId], references: [userId, sourceId], onDelete: Restrict)
-  redemption   PointRedemption @relation(fields: [userId, redemptionId], references: [userId, redemptionId], onDelete: Restrict)
+  userId         String                  @map("user_id") @db.Uuid
+  redemptionId   String                  @map("redemption_id") @db.Uuid
+  sourceId       String                  @map("source_id") @db.Uuid
+  amount         Int
+  extendedAmount Int                     @default(0) @map("extended_amount")
+  source         PointSource             @relation(fields: [userId, sourceId], references: [userId, sourceId], onDelete: Restrict)
+  redemption     PointRedemption         @relation(fields: [userId, redemptionId], references: [userId, redemptionId], onDelete: Restrict)
+  restorations   PointRestorationSplit[]
 
   @@id([userId, redemptionId, sourceId])
   @@index([userId, sourceId])
   @@map("point_funding")
+}
+
+model PointRestoration {
+  userId        String                  @map("user_id") @db.Uuid
+  restorationId String                  @map("restoration_id") @db.Uuid
+  redemptionId  String                  @map("redemption_id") @db.Uuid
+  amount        Int
+  credited      Int                     @default(0)
+  restoredAt    DateTime                @map("restored_at") @db.Timestamptz(3)
+  redemption    PointRedemption         @relation(fields: [userId, redemptionId], references: [userId, redemptionId], onDelete: Restrict)
+  funding       PointRestorationSplit[]
+  extensions    PointSourceExtension[]
+
+  @@id([userId, restorationId])
+  @@unique([userId, redemptionId])
+  @@unique([userId, restorationId, redemptionId])
+  @@map("point_restorations")
+}
+
+model PointSourceExtension {
+  userId        String           @map("user_id") @db.Uuid
+  sourceId      String           @map("source_id") @db.Uuid
+  restorationId String           @map("restoration_id") @db.Uuid
+  openedAt      DateTime         @map("opened_at") @db.Timestamptz(3)
+  expiresAt     DateTime         @map("expires_at") @db.Timestamptz(3)
+  source        PointSource      @relation(fields: [userId, sourceId], references: [userId, sourceId], onDelete: Restrict)
+  restoration   PointRestoration @relation(fields: [userId, restorationId], references: [userId, restorationId], onDelete: Restrict)
+
+  @@id([userId, sourceId])
+  @@index([userId, restorationId], map: "point_source_extensions_restoration_idx")
+  @@map("point_source_extensions")
+}
+
+model PointRestorationSplit {
+  userId        String           @map("user_id") @db.Uuid
+  restorationId String           @map("restoration_id") @db.Uuid
+  redemptionId  String           @map("redemption_id") @db.Uuid
+  sourceId      String           @map("source_id") @db.Uuid
+  amount        Int
+  expiresAt     DateTime         @map("expires_at") @db.Timestamptz(3)
+  restoration   PointRestoration @relation(fields: [userId, restorationId, redemptionId], references: [userId, restorationId, redemptionId], onDelete: Restrict)
+  funding       PointFunding     @relation(fields: [userId, redemptionId, sourceId], references: [userId, redemptionId, sourceId], onDelete: Restrict)
+
+  @@id([userId, restorationId, sourceId])
+  @@index([userId, sourceId], map: "point_restoration_splits_source_idx")
+  @@index([userId, redemptionId, sourceId], map: "point_restoration_splits_funding_idx")
+  @@map("point_restoration_splits")
 }
