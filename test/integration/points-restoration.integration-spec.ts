@@ -332,6 +332,24 @@ it('derives the full amount from funding and ignores caller amount and backdated
   expect(result.amount).toBe(60);
   expect(result.restoredAt).toEqual(afterExpiry);
 });
+it('rejects a partial restoration header even when its exact split and source counters balance', async () => {
+  const sourceId = await source(30);
+  await source(50, new Date('2026-04-01T10:00Z'));
+  const debit = await spend(60);
+  const command = restoration(debit.redemptionId);
+  const previous = await balances();
+  await expect(
+    prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`INSERT INTO point_restorations(user_id,restoration_id,redemption_id,amount,restored_at) VALUES (${userId}::uuid,${command.restorationId}::uuid,${debit.redemptionId}::uuid,30,${beforeExpiry})`;
+      await tx.$executeRaw`UPDATE point_sources SET remaining=remaining+30 WHERE user_id=${userId}::uuid AND source_id=${sourceId}::uuid`;
+      await tx.$executeRaw`INSERT INTO point_restoration_splits(user_id,restoration_id,redemption_id,source_id,amount,expires_at) VALUES (${userId}::uuid,${command.restorationId}::uuid,${debit.redemptionId}::uuid,${sourceId}::uuid,30,${originalExpiry})`;
+    }),
+  ).rejects.toThrow('point restoration must fully match redemption');
+  expect(await prisma.pointRestoration.count()).toBe(0);
+  expect(await prisma.pointRestorationSplit.count()).toBe(0);
+  expect(await balances()).toEqual(previous);
+});
+
 it('rejects raw SQL partial/fabricated splits, unbacked counters and forged extensions', async () => {
   const id = await source();
   const debit = await spend();
@@ -562,6 +580,11 @@ it('serializes restoration/redeem and conserves the observed lock order', async 
     () => spend(60),
   ]);
   expect(results[0].status).toBe('fulfilled');
+  if (results[1].status === 'rejected') {
+    expect(results[1].reason).toEqual(
+      expect.objectContaining({ message: 'Insufficient allocated points' }),
+    );
+  }
   expect(await balances()).toEqual([
     {
       remaining: results[1].status === 'fulfilled' ? 40 : 100,
