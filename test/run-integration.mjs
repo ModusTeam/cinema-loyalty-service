@@ -15,7 +15,23 @@ function run(command, args, env = process.env) {
     throw new Error(`${command} exited with ${result.status}`);
 }
 
+const forwardedArgs = process.argv.slice(2);
+let composeStarted = false;
+
 try {
+  const workerOption = forwardedArgs.find(
+    (arg) =>
+      arg === '--' ||
+      /^(?:--(?:no-)?(?:runInBand|run-in-band|maxWorkers|max-workers)(?:=|$)|-i(?:=|$)|-w(?:=|[0-9]|$))/i.test(
+        arg,
+      ),
+  );
+  if (workerOption)
+    throw new Error(
+      'Integration suites share one database; worker-mode options and -- are controlled by the runner. Use only test filters.',
+    );
+  // Attempted startup may leave partial resources, which must still be cleaned up.
+  composeStarted = true;
   run('docker', [...compose, 'up', '-d', '--wait']);
   const result = spawnSync('docker', [...compose, 'port', 'postgres', '5432'], {
     encoding: 'utf8',
@@ -44,7 +60,7 @@ try {
       'test/jest-integration.json',
       '--runInBand',
       '--coverage',
-      ...process.argv.slice(2),
+      ...forwardedArgs,
     ],
     env,
   );
@@ -52,10 +68,12 @@ try {
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
 } finally {
-  const result = spawnSync(
-    'docker',
-    [...compose, 'down', '--volumes', '--remove-orphans'],
-    { stdio: 'inherit' },
-  );
-  if (result.status !== 0) process.exitCode = 1;
+  if (composeStarted) {
+    const result = spawnSync(
+      'docker',
+      [...compose, 'down', '--volumes', '--remove-orphans'],
+      { stdio: 'inherit' },
+    );
+    if (result.status !== 0) process.exitCode = 1;
+  }
 }

@@ -363,8 +363,20 @@ it('validates cursors and treats another users UUID as a lexical bound without l
   expect((await page('ffffffff-ffff-4fff-bfff-ffffffffffff')).sources).toEqual(
     [],
   );
-  expect((await page(undefined, 1)).sources).toHaveLength(1);
 });
+it('honors limit one and advances the cursor without skipping or repeating sources', async () => {
+  const ids = [await source(), await source(), await source()].sort();
+  let cursor: string | undefined;
+  for (const [index, sourceId] of ids.entries()) {
+    const result = await page(cursor, 1);
+    expect(result.sources).toHaveLength(1);
+    expect(result.sources[0].sourceId).toBe(sourceId);
+    expect(result.nextSourceId).toBe(index < ids.length - 1 ? sourceId : null);
+    cursor = result.nextSourceId ?? undefined;
+  }
+  expect((await page(ids[ids.length - 1], 1)).sources).toEqual([]);
+});
+
 it('requires an existing profile, an interactive tx and read committed isolation', async () => {
   await expect(getPointsAvailability(prisma, { userId })).rejects.toThrow(
     'Interactive transaction required',
