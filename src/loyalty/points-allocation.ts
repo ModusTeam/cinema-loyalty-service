@@ -25,6 +25,46 @@ const restorationSchema = z.object({
   restorationId: uuid,
   redemptionId: uuid,
 });
+const AVAILABILITY_BATCH_SIZE = 100;
+const availabilitySchema = z.object({ userId: uuid });
+const availabilityPageSchema = availabilitySchema.extend({
+  afterSourceId: uuid.optional(),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(AVAILABILITY_BATCH_SIZE)
+    .default(AVAILABILITY_BATCH_SIZE),
+});
+export type GetPointsAvailability = z.input<typeof availabilitySchema>;
+export type GetPointsAvailabilityPage = z.input<typeof availabilityPageSchema>;
+export interface PointsAvailability {
+  decisionAt: Date;
+  accountingRemainder: bigint;
+  spendable: bigint;
+  unavailable: bigint;
+  originalAvailable: bigint;
+  extendedAvailable: bigint;
+  nextExpiry: Date | null;
+}
+export interface PointsSourceAvailability {
+  sourceId: string;
+  sourceRef: string;
+  issuedAt: Date;
+  originalExpiresAt: Date;
+  extensionDeadline: Date | null;
+  remaining: number;
+  originalAvailable: number;
+  extendedAvailable: number;
+  unavailable: number;
+  available: number;
+  effectiveExpiry: Date | null;
+}
+export interface PointsAvailabilityPage {
+  decisionAt: Date;
+  sources: PointsSourceAvailability[];
+  nextSourceId: string | null;
+}
 export type IssuePointsSource = z.input<typeof sourceSchema>;
 export type RedeemPoints = z.input<typeof redemptionSchema>;
 export type RestorePoints = z.input<typeof restorationSchema>;
@@ -60,6 +100,123 @@ async function lockProfile(
     Array<{ active: boolean }>
   >`SELECT txid_current_if_assigned() IS NOT NULL AS active`;
   if (!context.active) throw new Error('Interactive transaction required');
+}
+
+/** Locks against cooperating writers and rejects snapshots established before that lock. */
+async function availabilityDecisionTime(
+  tx: Prisma.TransactionClient,
+  userId: string,
+): Promise<Date> {
+  await lockProfile(tx, userId);
+  const [context] = await tx.$queryRaw<
+    Array<{ isolation: string }>
+  >`SELECT current_setting('transaction_isolation') AS isolation`;
+  if (context.isolation !== 'read committed')
+    throw new Error('Read committed transaction required');
+  const [clock] = await tx.$queryRaw<
+    Array<{ decisionAt: Date }>
+  >`SELECT points_decision_time() AS "decisionAt"`;
+  return clock.decisionAt;
+}
+
+/** Shared SQL policy for redemption and reads; windowing bounds every projection read. */
+function sourceAvailabilitySql(
+  userId: string,
+  decisionAt: Date,
+  window?: { afterSourceId?: string; limit: number },
+): Prisma.Sql {
+  return Prisma.sql`WITH buckets AS (
+    SELECT s.source_id AS "sourceId", s.source_ref AS "sourceRef", s.issued_at AS "issuedAt",
+      s.original_expires_at AS "originalExpiresAt", e.expires_at AS "extensionDeadline", s.remaining,
+      CASE WHEN s.issued_at <= ${decisionAt} AND s.original_expires_at > ${decisionAt}
+        THEN s.remaining ELSE 0 END AS "originalAvailable",
+      CASE WHEN s.issued_at <= ${decisionAt} AND s.original_expires_at <= ${decisionAt}
+        AND e.opened_at <= ${decisionAt} AND e.expires_at > ${decisionAt}
+        THEN s.extended_remaining ELSE 0 END AS "extendedAvailable"
+    FROM point_sources s
+    LEFT JOIN point_source_extensions e ON e.user_id = s.user_id AND e.source_id = s.source_id
+    WHERE s.user_id = ${userId}::uuid
+      ${window?.afterSourceId ? Prisma.sql`AND s.source_id > ${window.afterSourceId}::uuid` : Prisma.empty}
+    ${window ? Prisma.sql`ORDER BY s.source_id LIMIT ${window.limit}` : Prisma.empty}
+  ) SELECT *, "originalAvailable" + "extendedAvailable" AS available,
+    remaining - "originalAvailable" - "extendedAvailable" AS unavailable,
+    CASE WHEN "originalAvailable" > 0 THEN "originalExpiresAt"
+      WHEN "extendedAvailable" > 0 THEN "extensionDeadline" ELSE NULL END AS "effectiveExpiry"
+    FROM buckets
+    ${window ? Prisma.sql`ORDER BY "sourceId"` : Prisma.empty}`;
+}
+
+/**
+ * Returns exact internal bigint totals as of one database decision time after
+ * locking the existing profile. Requires a caller-owned READ COMMITTED
+ * interactive transaction; scans UUID keyset batches without retaining sources.
+ * This observation does not reserve funds for a later redemption.
+ */
+export async function getPointsAvailability(
+  tx: Prisma.TransactionClient,
+  input: GetPointsAvailability,
+): Promise<PointsAvailability> {
+  const command = availabilitySchema.parse(input);
+  const decisionAt = await availabilityDecisionTime(tx, command.userId);
+  const result: PointsAvailability = {
+    decisionAt,
+    accountingRemainder: 0n,
+    spendable: 0n,
+    unavailable: 0n,
+    originalAvailable: 0n,
+    extendedAvailable: 0n,
+    nextExpiry: null,
+  };
+  let afterSourceId: string | undefined;
+  for (;;) {
+    const sources = await tx.$queryRaw<PointsSourceAvailability[]>(
+      sourceAvailabilitySql(command.userId, decisionAt, {
+        afterSourceId,
+        limit: AVAILABILITY_BATCH_SIZE,
+      }),
+    );
+    for (const source of sources) {
+      result.accountingRemainder += BigInt(source.remaining);
+      result.spendable += BigInt(source.available);
+      result.unavailable += BigInt(source.unavailable);
+      result.originalAvailable += BigInt(source.originalAvailable);
+      result.extendedAvailable += BigInt(source.extendedAvailable);
+      if (
+        source.effectiveExpiry &&
+        (!result.nextExpiry || source.effectiveExpiry < result.nextExpiry)
+      )
+        result.nextExpiry = source.effectiveExpiry;
+    }
+    if (sources.length < AVAILABILITY_BATCH_SIZE) return result;
+    afterSourceId = sources[sources.length - 1].sourceId;
+  }
+}
+
+/**
+ * Returns at most 100 source observations in UUID order. The optional cursor is
+ * a lexical UUID bound and need not identify an existing source. Each call has
+ * its own post-lock database decision time; pages across requests do not promise
+ * a shared snapshot. Requires an existing profile and READ COMMITTED caller tx.
+ */
+export async function getPointsAvailabilityPage(
+  tx: Prisma.TransactionClient,
+  input: GetPointsAvailabilityPage,
+): Promise<PointsAvailabilityPage> {
+  const command = availabilityPageSchema.parse(input);
+  const decisionAt = await availabilityDecisionTime(tx, command.userId);
+  const rows = await tx.$queryRaw<PointsSourceAvailability[]>(
+    sourceAvailabilitySql(command.userId, decisionAt, {
+      afterSourceId: command.afterSourceId,
+      limit: command.limit + 1,
+    }),
+  );
+  const sources = rows.slice(0, command.limit);
+  return {
+    decisionAt,
+    sources,
+    nextSourceId:
+      rows.length > command.limit ? sources[sources.length - 1].sourceId : null,
+  };
 }
 
 /**
@@ -140,16 +297,9 @@ export async function redeemPoints(
   >`SELECT points_decision_time() AS "spentAt"`;
   const sources = await tx.$queryRaw<
     Array<{ sourceId: string; available: number; extended: boolean }>
-  >`SELECT s.source_id AS "sourceId",
-      CASE WHEN s.original_expires_at > ${clock.spentAt} THEN s.remaining ELSE s.extended_remaining END AS available,
-      s.original_expires_at <= ${clock.spentAt} AS extended
-    FROM point_sources s
-    LEFT JOIN point_source_extensions e ON e.user_id = s.user_id AND e.source_id = s.source_id
-    WHERE s.user_id = ${command.userId}::uuid AND s.issued_at <= ${clock.spentAt}
-      AND ((s.original_expires_at > ${clock.spentAt} AND s.remaining > 0)
-        OR (s.original_expires_at <= ${clock.spentAt} AND s.extended_remaining > 0
-          AND e.opened_at <= ${clock.spentAt} AND e.expires_at > ${clock.spentAt}))
-    ORDER BY CASE WHEN s.original_expires_at > ${clock.spentAt} THEN s.original_expires_at ELSE e.expires_at END, s.source_id`;
+  >(Prisma.sql`SELECT "sourceId", available, "extendedAvailable" > 0 AS extended
+    FROM (${sourceAvailabilitySql(command.userId, clock.spentAt)}) availability
+    WHERE available > 0 ORDER BY "effectiveExpiry", "sourceId"`);
   let needed = command.amount;
   const funding: Array<{
     sourceId: string;
