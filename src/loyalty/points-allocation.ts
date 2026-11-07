@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { randomUUID } from 'node:crypto';
 import { Prisma } from 'src/generated/prisma/client';
 import { lockLoyaltyProfile } from 'src/prisma/profile-transaction';
 
@@ -108,15 +109,22 @@ async function availabilityDecisionTime(
   userId: string,
 ): Promise<Date> {
   await lockProfile(tx, userId);
+  await requireReadCommitted(tx);
+  const [clock] = await tx.$queryRaw<
+    Array<{ decisionAt: Date }>
+  >`SELECT points_decision_time() AS "decisionAt"`;
+  return clock.decisionAt;
+}
+
+/** Avoids decisions from snapshots established before the profile lock. */
+async function requireReadCommitted(
+  tx: Prisma.TransactionClient,
+): Promise<void> {
   const [context] = await tx.$queryRaw<
     Array<{ isolation: string }>
   >`SELECT current_setting('transaction_isolation') AS isolation`;
   if (context.isolation !== 'read committed')
     throw new Error('Read committed transaction required');
-  const [clock] = await tx.$queryRaw<
-    Array<{ decisionAt: Date }>
-  >`SELECT points_decision_time() AS "decisionAt"`;
-  return clock.decisionAt;
 }
 
 /** Shared SQL policy for redemption and reads; windowing bounds every projection read. */
@@ -129,7 +137,7 @@ function sourceAvailabilitySql(
     SELECT s.source_id AS "sourceId", s.source_ref AS "sourceRef", s.issued_at AS "issuedAt",
       s.original_expires_at AS "originalExpiresAt", e.expires_at AS "extensionDeadline", s.remaining,
       CASE WHEN s.issued_at <= ${decisionAt} AND s.original_expires_at > ${decisionAt}
-        THEN s.remaining ELSE 0 END AS "originalAvailable",
+        THEN s.remaining - s.extended_remaining ELSE 0 END AS "originalAvailable",
       CASE WHEN s.issued_at <= ${decisionAt} AND s.original_expires_at <= ${decisionAt}
         AND e.opened_at <= ${decisionAt} AND e.expires_at > ${decisionAt}
         THEN s.extended_remaining ELSE 0 END AS "extendedAvailable"
@@ -415,4 +423,213 @@ async function restorationSnapshot(
     WHERE user_id = ${command.userId}::uuid AND restoration_id = ${command.restorationId}::uuid
     ORDER BY expires_at, source_id`;
   return { amount, restoredAt, funding };
+}
+
+const expirySchema = z
+  .object({ userId: uuid, operationId: uuid, sourceId: uuid })
+  .strict();
+const expiryBatchSchema = z
+  .object({
+    userId: uuid,
+    afterSourceId: uuid.optional(),
+    limit: z.number().int().min(1).max(500).default(500),
+  })
+  .strict();
+export type ExpireSourcePoints = z.input<typeof expirySchema>;
+export type ExpirePointsBatch = z.input<typeof expiryBatchSchema>;
+export interface PointExpiryEntry {
+  id: string;
+  bucket: 'ORIGINAL' | 'EXTENDED';
+  amount: number;
+  deadline: Date;
+  creditWatermark: bigint;
+}
+export interface PointExpiryResult {
+  operationId: string;
+  sourceId: string;
+  decisionAt: Date;
+  amount: number;
+  entries: PointExpiryEntry[];
+}
+export interface PointExpiryBatchResult {
+  decisionAt: Date;
+  operations: PointExpiryResult[];
+  nextSourceId: string | null;
+}
+
+/** Reads only saved evidence, including a saved zero decision, for exact replay. */
+async function expirySnapshot(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  operationId: string,
+): Promise<PointExpiryResult | null> {
+  const [header] = await tx.$queryRaw<
+    Array<Omit<PointExpiryResult, 'entries'>>
+  >`
+    SELECT operation_id AS "operationId", source_id AS "sourceId", decision_at AS "decisionAt", amount
+    FROM point_expiry_operations WHERE user_id = ${userId}::uuid AND operation_id = ${operationId}::uuid`;
+  if (!header) return null;
+  const entries = await tx.$queryRaw<PointExpiryEntry[]>`
+    SELECT id, bucket, amount, deadline, credit_watermark AS "creditWatermark"
+    FROM point_expiry_entries WHERE user_id = ${userId}::uuid AND operation_id = ${operationId}::uuid ORDER BY bucket`;
+  return { ...header, entries };
+}
+
+/** Locks fresh bucket quantities; entry triggers atomically retire and protect their totals. */
+async function expireAt(
+  tx: Prisma.TransactionClient,
+  command: ExpireSourcePoints,
+  decisionAt: Date,
+): Promise<PointExpiryResult> {
+  const [source] = await tx.$queryRaw<
+    Array<{
+      remaining: number;
+      extendedRemaining: number;
+      originalExpiresAt: Date;
+      originalWatermark: bigint;
+      extendedWatermark: bigint;
+    }>
+  >`SELECT remaining, extended_remaining AS "extendedRemaining", original_expires_at AS "originalExpiresAt",
+      restored - extended_restored AS "originalWatermark", extended_restored AS "extendedWatermark"
+    FROM point_sources WHERE user_id = ${command.userId}::uuid AND source_id = ${command.sourceId}::uuid FOR UPDATE`;
+  if (!source) throw new Error('Point expiry source not found');
+  const [extension] = await tx.$queryRaw<Array<{ deadline: Date }>>`
+    SELECT expires_at AS deadline FROM point_source_extensions WHERE user_id = ${command.userId}::uuid AND source_id = ${command.sourceId}::uuid`;
+  const entries: PointExpiryEntry[] = [];
+  if (
+    source.originalExpiresAt <= decisionAt &&
+    source.remaining > source.extendedRemaining
+  )
+    entries.push({
+      id: randomUUID(),
+      bucket: 'ORIGINAL',
+      amount: source.remaining - source.extendedRemaining,
+      deadline: source.originalExpiresAt,
+      creditWatermark: source.originalWatermark,
+    });
+  if (
+    extension &&
+    extension.deadline <= decisionAt &&
+    source.extendedRemaining > 0
+  )
+    entries.push({
+      id: randomUUID(),
+      bucket: 'EXTENDED',
+      amount: source.extendedRemaining,
+      deadline: extension.deadline,
+      creditWatermark: source.extendedWatermark,
+    });
+  const amount = entries.reduce((sum, entry) => sum + entry.amount, 0);
+  await tx.$executeRaw`INSERT INTO point_expiry_operations(user_id,operation_id,source_id,decision_at,amount)
+    VALUES (${command.userId}::uuid,${command.operationId}::uuid,${command.sourceId}::uuid,${decisionAt},${amount})`;
+  for (const entry of entries) {
+    await tx.$executeRaw`INSERT INTO point_expiry_entries(id,user_id,operation_id,source_id,bucket,amount,deadline,credit_watermark)
+      VALUES (${entry.id}::uuid,${command.userId}::uuid,${command.operationId}::uuid,${command.sourceId}::uuid,
+        ${entry.bucket},${entry.amount},${entry.deadline},${entry.creditWatermark})`;
+  }
+  return {
+    operationId: command.operationId,
+    sourceId: command.sourceId,
+    decisionAt,
+    amount,
+    entries: entries.sort((a, b) => a.bucket.localeCompare(b.bucket)),
+  };
+}
+
+/**
+ * Retires full currently due buckets without accepting an amount or changing
+ * deadlines. Requires a caller-owned READ COMMITTED transaction and profile.
+ * Exact replay returns the original evidence before reading a new clock, even
+ * when a later restoration has credited additional already expired points.
+ */
+export async function expireSourcePoints(
+  tx: Prisma.TransactionClient,
+  input: ExpireSourcePoints,
+): Promise<PointExpiryResult> {
+  const command = expirySchema.parse(input);
+  await lockProfile(tx, command.userId);
+  await requireReadCommitted(tx);
+  const saved = await expirySnapshot(tx, command.userId, command.operationId);
+  if (saved) {
+    if (saved.sourceId !== command.sourceId)
+      throw new Error('Point expiry identity conflict');
+    return saved;
+  }
+  const [clock] = await tx.$queryRaw<Array<{ decisionAt: Date }>>`
+    SELECT points_decision_time() AS "decisionAt"`;
+  return expireAt(tx, command, clock.decisionAt);
+}
+
+/** Builds one bounded portion of the circular due-source UUID scan. */
+function expiryCandidates(
+  userId: string,
+  decisionAt: Date,
+  bound: Prisma.Sql,
+  limit: number,
+): Prisma.Sql {
+  return Prisma.sql`SELECT s.source_id AS "sourceId" FROM point_sources s
+    LEFT JOIN point_source_extensions e USING (user_id, source_id)
+    WHERE s.user_id = ${userId}::uuid AND ${bound}
+      AND ((s.original_expires_at <= ${decisionAt} AND s.remaining > s.extended_remaining)
+        OR (e.expires_at <= ${decisionAt} AND s.extended_remaining > 0))
+    ORDER BY s.source_id LIMIT ${limit}`;
+}
+
+/**
+ * Retires at most 500 sources for one profile in the caller's transaction.
+ * A circular UUID scan uses at most two bounded candidate queries and one
+ * post-lock decision time. Lookahead includes due credits behind the cursor;
+ * no source is processed twice within a call. The cursor is progress, not a
+ * batch idempotency key: restart may advance other sources, while persisted
+ * bucket watermarks prevent retiring a credited quantity twice.
+ */
+export async function expirePointsBatch(
+  tx: Prisma.TransactionClient,
+  input: ExpirePointsBatch,
+): Promise<PointExpiryBatchResult> {
+  const command = expiryBatchSchema.parse(input);
+  const decisionAt = await availabilityDecisionTime(tx, command.userId);
+  const rows = await tx.$queryRaw<Array<{ sourceId: string }>>(
+    expiryCandidates(
+      command.userId,
+      decisionAt,
+      command.afterSourceId
+        ? Prisma.sql`s.source_id > ${command.afterSourceId}::uuid`
+        : Prisma.sql`true`,
+      command.limit + 1,
+    ),
+  );
+  if (command.afterSourceId && rows.length < command.limit + 1) {
+    rows.push(
+      ...(await tx.$queryRaw<Array<{ sourceId: string }>>(
+        expiryCandidates(
+          command.userId,
+          decisionAt,
+          Prisma.sql`s.source_id <= ${command.afterSourceId}::uuid`,
+          command.limit + 1 - rows.length,
+        ),
+      )),
+    );
+  }
+  const operations: PointExpiryResult[] = [];
+  for (const row of rows.slice(0, command.limit))
+    operations.push(
+      await expireAt(
+        tx,
+        {
+          userId: command.userId,
+          sourceId: row.sourceId,
+          operationId: randomUUID(),
+        },
+        decisionAt,
+      ),
+    );
+  return {
+    decisionAt,
+    operations,
+    nextSourceId:
+      rows.length > command.limit
+        ? operations[operations.length - 1].sourceId
+        : null,
+  };
 }
