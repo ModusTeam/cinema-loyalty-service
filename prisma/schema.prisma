@@ -312,18 +312,21 @@ model CustomerFactReceipt {
 
 // Dormant source accounting; independent of the legacy balance projection.
 model PointSource {
-  userId            String                @map("user_id") @db.Uuid
-  sourceId          String                @map("source_id") @db.Uuid
-  sourceRef         String                @map("source_ref") @db.VarChar(128)
+  userId            String                 @map("user_id") @db.Uuid
+  sourceId          String                 @map("source_id") @db.Uuid
+  sourceRef         String                 @map("source_ref") @db.VarChar(128)
   granted           Int
   remaining         Int
-  extendedRemaining Int                   @default(0) @map("extended_remaining")
-  spent             BigInt                @default(0)
-  restored          BigInt                @default(0)
-  extendedSpent     BigInt                @default(0) @map("extended_spent")
-  extendedRestored  BigInt                @default(0) @map("extended_restored")
-  issuedAt          DateTime              @map("issued_at") @db.Timestamptz(3)
-  originalExpiresAt DateTime              @map("original_expires_at") @db.Timestamptz(3)
+  extendedRemaining Int                    @default(0) @map("extended_remaining")
+  expired           BigInt                 @default(0)
+  extendedExpired   BigInt                 @default(0) @map("extended_expired")
+  expiryOperations  PointExpiryOperation[]
+  spent             BigInt                 @default(0)
+  restored          BigInt                 @default(0)
+  extendedSpent     BigInt                 @default(0) @map("extended_spent")
+  extendedRestored  BigInt                 @default(0) @map("extended_restored")
+  issuedAt          DateTime               @map("issued_at") @db.Timestamptz(3)
+  originalExpiresAt DateTime               @map("original_expires_at") @db.Timestamptz(3)
   funding           PointFunding[]
   extension         PointSourceExtension?
 
@@ -408,4 +411,36 @@ model PointRestorationSplit {
   @@index([userId, sourceId], map: "point_restoration_splits_source_idx")
   @@index([userId, redemptionId, sourceId], map: "point_restoration_splits_funding_idx")
   @@map("point_restoration_splits")
+}
+
+model PointExpiryOperation {
+  userId      String             @map("user_id") @db.Uuid
+  operationId String             @map("operation_id") @db.Uuid
+  sourceId    String             @map("source_id") @db.Uuid
+  decisionAt  DateTime           @map("decision_at") @db.Timestamptz(3)
+  amount      Int
+  applied     Int                @default(0)
+  source      PointSource        @relation(fields: [userId, sourceId], references: [userId, sourceId], onDelete: Restrict)
+  entries     PointExpiryEntry[]
+
+  @@id([userId, operationId])
+  @@unique([userId, operationId, sourceId])
+  @@index([userId, sourceId], map: "point_expiry_operations_source_idx")
+  @@map("point_expiry_operations")
+}
+
+model PointExpiryEntry {
+  id              String               @id @db.Uuid
+  userId          String               @map("user_id") @db.Uuid
+  operationId     String               @map("operation_id") @db.Uuid
+  sourceId        String               @map("source_id") @db.Uuid
+  bucket          String               @db.VarChar(8)
+  amount          Int
+  deadline        DateTime             @db.Timestamptz(3)
+  creditWatermark BigInt               @map("credit_watermark")
+  operation       PointExpiryOperation @relation(fields: [userId, operationId, sourceId], references: [userId, operationId, sourceId], onDelete: Restrict)
+
+  @@unique([userId, sourceId, bucket, creditWatermark])
+  @@unique([userId, operationId, bucket])
+  @@map("point_expiry_entries")
 }
