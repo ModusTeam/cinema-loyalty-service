@@ -466,6 +466,22 @@ it('rejects direct counter updates balanced unbacked retirement and fake initial
     prisma.$executeRaw`INSERT INTO point_expiry_operations(user_id,operation_id,source_id,decision_at,amount,applied) VALUES (${userId}::uuid,${randomUUID()}::uuid,${id}::uuid,${deadline},100,100)`,
   ).rejects.toThrow('snapshot mismatch');
 });
+it('rejects mutually compensating nonzero initial spent and restored totals', async () => {
+  const sourceId = randomUUID();
+  await expect(
+    prisma.$executeRaw`INSERT INTO point_sources(user_id,source_id,source_ref,granted,remaining,issued_at,original_expires_at,spent,restored)
+      VALUES (${userId}::uuid,${sourceId}::uuid,${sourceId},100,100,${issuedAt},${deadline},10,10)`,
+  ).rejects.toThrow('initial source totals must be zero');
+  expect(await prisma.pointSource.count()).toBe(0);
+});
+it('rejects mutually compensating nonzero initial extended spent and restored totals', async () => {
+  const sourceId = randomUUID();
+  await expect(
+    prisma.$executeRaw`INSERT INTO point_sources(user_id,source_id,source_ref,granted,remaining,issued_at,original_expires_at,extended_spent,extended_restored)
+      VALUES (${userId}::uuid,${sourceId}::uuid,${sourceId},100,100,${issuedAt},${deadline},10,10)`,
+  ).rejects.toThrow('initial source totals must be zero');
+  expect(await prisma.pointSource.count()).toBe(0);
+});
 it('rejects incomplete forged zero and oversized operation totals', async () => {
   const id = await source();
   await at(deadline);
