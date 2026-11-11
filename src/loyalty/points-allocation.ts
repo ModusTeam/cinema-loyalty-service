@@ -2,6 +2,14 @@ import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from 'src/generated/prisma/client';
 import { lockLoyaltyProfile } from 'src/prisma/profile-transaction';
+import {
+  claimPointCommand,
+  parsePointCommand,
+  PointCommandResult,
+  replayPointCommand,
+} from './point-command-idempotency';
+import { ERROR_MESSAGES, LOYALTY_RULES } from './constants/loyalty.constants';
+import { PointsTransactionType } from './events/points-transaction-type.enum';
 
 const uuid = z.uuid().transform((value) => value.toLowerCase());
 const amount = z.number().int().positive().max(2147483647);
@@ -88,8 +96,8 @@ type SourceRow = {
 };
 type RedemptionRow = { debitRef: string; amount: number };
 
-// These operations require the caller's transaction. They deliberately do not
-// modify the legacy balance, ledger, command keys, or any external service.
+// Standalone source operations leave the legacy projection untouched. The
+// explicit checkout orchestrator below also writes the projection and ledger.
 /** Requires a live caller transaction so the profile lock survives subsequent writes. */
 async function lockProfile(
   tx: Prisma.TransactionClient,
@@ -166,6 +174,14 @@ export async function getPointsAvailability(
 ): Promise<PointsAvailability> {
   const command = availabilitySchema.parse(input);
   const decisionAt = await availabilityDecisionTime(tx, command.userId);
+  return pointsAvailabilityAt(tx, command.userId, decisionAt);
+}
+
+async function pointsAvailabilityAt(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  decisionAt: Date,
+): Promise<PointsAvailability> {
   const result: PointsAvailability = {
     decisionAt,
     accountingRemainder: 0n,
@@ -178,7 +194,7 @@ export async function getPointsAvailability(
   let afterSourceId: string | undefined;
   for (;;) {
     const sources = await tx.$queryRaw<PointsSourceAvailability[]>(
-      sourceAvailabilitySql(command.userId, decisionAt, {
+      sourceAvailabilitySql(userId, decisionAt, {
         afterSourceId,
         limit: AVAILABILITY_BATCH_SIZE,
       }),
@@ -275,6 +291,15 @@ export async function redeemPoints(
 ): Promise<RedemptionResult> {
   const command = redemptionSchema.parse(input);
   await lockProfile(tx, command.userId);
+  return redeemPointsAt(tx, command);
+}
+
+async function redeemPointsAt(
+  tx: Prisma.TransactionClient,
+  command: RedeemPoints,
+  decisionAt?: Date,
+  binding?: { checkoutDebitId: string; commandEventId: string },
+): Promise<RedemptionResult> {
   const existing = await tx.$queryRaw<
     RedemptionRow[]
   >`SELECT debit_ref AS "debitRef", amount FROM point_redemptions
@@ -300,13 +325,16 @@ export async function redeemPoints(
     WHERE user_id = ${command.userId}::uuid AND debit_ref = ${command.debitRef}::uuid`;
   if (duplicateDebit.length)
     throw new Error('Point redemption identity conflict');
-  const [clock] = await tx.$queryRaw<
-    Array<{ spentAt: Date }>
-  >`SELECT points_decision_time() AS "spentAt"`;
+  const spentAt =
+    decisionAt ??
+    (
+      await tx.$queryRaw<Array<{ spentAt: Date }>>`
+    SELECT points_decision_time() AS "spentAt"`
+    )[0].spentAt;
   const sources = await tx.$queryRaw<
     Array<{ sourceId: string; available: number; extended: boolean }>
   >(Prisma.sql`SELECT "sourceId", available, "extendedAvailable" > 0 AS extended
-    FROM (${sourceAvailabilitySql(command.userId, clock.spentAt)}) availability
+    FROM (${sourceAvailabilitySql(command.userId, spentAt)}) availability
     WHERE available > 0 ORDER BY "effectiveExpiry", "sourceId"`);
   let needed = command.amount;
   const funding: Array<{
@@ -325,9 +353,11 @@ export async function redeemPoints(
     if (needed === 0) break;
   }
   if (needed > 0) throw new Error('Insufficient allocated points');
-  await tx.$executeRaw`INSERT INTO point_redemptions (user_id, redemption_id, debit_ref, amount, spent_at)
+  await tx.$executeRaw`INSERT INTO point_redemptions
+      (user_id, redemption_id, debit_ref, amount, spent_at, checkout_debit_id, command_event_id)
     VALUES (${command.userId}::uuid, ${command.redemptionId}::uuid,
-      ${command.debitRef}::uuid, ${command.amount}, ${clock.spentAt})`;
+      ${command.debitRef}::uuid, ${command.amount}, ${spentAt},
+      ${binding?.checkoutDebitId ?? null}::uuid, ${binding?.commandEventId ?? null})`;
   for (const split of funding) {
     await tx.$executeRaw`UPDATE point_sources SET remaining = remaining - ${split.amount},
       extended_remaining = extended_remaining - ${split.extendedAmount}
@@ -632,4 +662,96 @@ export async function expirePointsBatch(
         ? operations[operations.length - 1].sourceId
         : null,
   };
+}
+
+export interface CheckoutPointsDebit {
+  userId: string;
+  orderId: string;
+  amount: number;
+  idempotencyKey: string;
+}
+
+/**
+ * Dormant checkout orchestration in a caller-owned READ COMMITTED transaction.
+ * A fresh command requires an already reconciled profile: balance must equal
+ * currently spendable sources. It never backfills or repairs historic data.
+ * Replay returns the saved legacy result before consulting today's sources,
+ * including old successes without an accounting binding. The trusted caller
+ * owns order eligibility and purchase caps; this primitive has no price input.
+ * Errors propagate: the caller must roll back the entire transaction.
+ */
+export async function debitCheckoutPoints(
+  tx: Prisma.TransactionClient,
+  input: CheckoutPointsDebit,
+): Promise<PointCommandResult> {
+  const command = parsePointCommand({ ...input, operation: 'DEDUCT' });
+  if (!command)
+    return {
+      success: false,
+      balanceAfter: 0,
+      errorMessage: ERROR_MESSAGES.INVALID_POINT_COMMAND,
+    };
+  await lockProfile(tx, command.userId);
+  await requireReadCommitted(tx);
+  const replay = await replayPointCommand(tx, command);
+  if (replay) return replay;
+  if (command.amount < LOYALTY_RULES.MINIMUM_DEDUCTION)
+    return {
+      success: false,
+      balanceAfter: 0,
+      errorMessage: `Minimum deduction is ${LOYALTY_RULES.MINIMUM_DEDUCTION} points`,
+    };
+
+  const [clock] = await tx.$queryRaw<Array<{ decisionAt: Date }>>`
+    SELECT points_decision_time() AS "decisionAt"`;
+  const availability = await pointsAvailabilityAt(
+    tx,
+    command.userId,
+    clock.decisionAt,
+  );
+  const profile = await tx.loyaltyProfile.findUniqueOrThrow({
+    where: { userId: command.userId },
+  });
+  if (BigInt(profile.balance) !== availability.spendable)
+    throw new Error('Source balance projection mismatch');
+  if (profile.balance < command.amount)
+    return {
+      success: false,
+      balanceAfter: profile.balance,
+      errorMessage: ERROR_MESSAGES.INSUFFICIENT_POINTS,
+    };
+
+  const balanceAfter = profile.balance - command.amount;
+  const racedReplay = await claimPointCommand(tx, command, balanceAfter);
+  if (racedReplay) return racedReplay;
+  const debit = await tx.pointsTransaction.create({
+    data: {
+      userId: command.userId,
+      type: PointsTransactionType.BURN_DISCOUNT,
+      points: -command.amount,
+      balanceAfter,
+      orderId: command.orderId,
+      description: `Redeemed ${command.amount} pts for order ${command.orderId}`,
+    },
+  });
+  await tx.checkoutDebit.create({ data: { debitId: debit.id } });
+  await redeemPointsAt(
+    tx,
+    {
+      userId: command.userId,
+      redemptionId: randomUUID(),
+      debitRef: debit.id,
+      amount: command.amount,
+    },
+    clock.decisionAt,
+    { checkoutDebitId: debit.id, commandEventId: command.idempotencyKey },
+  );
+  await tx.loyaltyProfile.update({
+    where: { userId: command.userId },
+    data: {
+      balance: balanceAfter,
+      lastActivityAt: clock.decisionAt,
+    },
+  });
+  return { success: true, balanceAfter, errorMessage: '' };
 }

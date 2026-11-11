@@ -81,13 +81,14 @@ model LoyaltyProfile {
 }
 
 model ProcessedEvent {
-  eventId      String   @id @map("event_id") @db.VarChar(128)
-  processedAt  DateTime @default(now()) @map("processed_at") @db.Timestamptz()
-  operation    String?  @db.VarChar(16)
-  userId       String?  @map("user_id") @db.Uuid
-  orderId      String?  @map("order_id") @db.Uuid
-  amount       Int?
-  balanceAfter Int?     @map("balance_after")
+  eventId         String           @id @map("event_id") @db.VarChar(128)
+  processedAt     DateTime         @default(now()) @map("processed_at") @db.Timestamptz()
+  operation       String?          @db.VarChar(16)
+  userId          String?          @map("user_id") @db.Uuid
+  orderId         String?          @map("order_id") @db.Uuid
+  amount          Int?
+  balanceAfter    Int?             @map("balance_after")
+  pointRedemption PointRedemption?
 
   @@map("processed_events")
 }
@@ -114,8 +115,9 @@ model CheckoutDebit {
   debitId  String  @id @map("debit_id") @db.Uuid
   refundId String? @unique @map("refund_id") @db.Uuid
 
-  debit  PointsTransaction  @relation("CheckoutDebit", fields: [debitId], references: [id], onDelete: Restrict)
-  refund PointsTransaction? @relation("CheckoutRefund", fields: [refundId], references: [id], onDelete: Restrict)
+  debit           PointsTransaction  @relation("CheckoutDebit", fields: [debitId], references: [id], onDelete: Restrict)
+  refund          PointsTransaction? @relation("CheckoutRefund", fields: [refundId], references: [id], onDelete: Restrict)
+  pointRedemption PointRedemption?
 
   @@map("checkout_debits")
 }
@@ -337,14 +339,18 @@ model PointSource {
 }
 
 model PointRedemption {
-  userId       String            @map("user_id") @db.Uuid
-  redemptionId String            @map("redemption_id") @db.Uuid
-  debitRef     String            @map("debit_ref") @db.Uuid
-  funded       Int               @default(0)
-  amount       Int
-  spentAt      DateTime          @map("spent_at") @db.Timestamptz(3)
-  funding      PointFunding[]
-  restoration  PointRestoration?
+  userId          String            @map("user_id") @db.Uuid
+  redemptionId    String            @map("redemption_id") @db.Uuid
+  debitRef        String            @map("debit_ref") @db.Uuid
+  checkoutDebitId String?           @unique @map("checkout_debit_id") @db.Uuid
+  commandEventId  String?           @unique @map("command_event_id") @db.VarChar(128)
+  checkoutDebit   CheckoutDebit?    @relation(fields: [checkoutDebitId], references: [debitId], onDelete: Restrict, onUpdate: Restrict)
+  commandEvent    ProcessedEvent?   @relation(fields: [commandEventId], references: [eventId], onDelete: Restrict, onUpdate: Restrict)
+  funded          Int               @default(0)
+  amount          Int
+  spentAt         DateTime          @map("spent_at") @db.Timestamptz(3)
+  funding         PointFunding[]
+  restoration     PointRestoration?
 
   @@id([userId, redemptionId])
   @@unique([userId, debitRef])
