@@ -1,5 +1,9 @@
 # Cinema Loyalty Service — Architecture Evolution & Business Rules Specification
 
+Поточна редакція: **3 — Dynamic Economy Management**, 2026-11-11. Продуктові рішення R3-01…R3-27 та консолідований дизайн явно погоджено користувачем: «так мені все подобається онови». Дозволено оновити лише специфікацію; реалізація, commit/PR, міграції та deployment цим погодженням не авторизовані.
+
+### Історичне погодження Revision 2
+
 Дата: 2026-10-23. Редакція: 2 — фіналізація бізнес-рішень.
 
 Статус: **консолідовану специфікацію явно погоджено користувачем; реалізація не авторизована**.
@@ -7,6 +11,12 @@
 Цей документ зберігає специфікацію з brainstorming. Редакція 2 включає індивідуально погоджені рішення H-1…H-16 та фінальне схвалення консолідованого підсумку: «так погоджую».
 
 Це погодження дизайну й дозвіл оновити цей документ. Воно не означає дозвіл змінювати код, моноліт, контракти, виконувати міграції/reset, створювати коміти/PR або робити deployment. Кожен implementation stage погоджується окремо. Блокувальні бізнес-питання закриті; результати та неблокувальні технічні уточнення збережено в розділі H.
+
+### Amendment Revision 3
+
+H-1…H-16 та каталог I-01…I-33 залишаються чинними. Revision 3 явно розширює редагованість earning rates, reward cap і кампаній: 3/4/5% та cap 200 стають початковою конфігурацією в погоджених межах, а не дозволом змінювати будь-які правила. Highest multiplier, birthday/premiere defaults, redemption, accounting та entitlement semantics збережено.
+
+Реєстр нових **погоджених продуктових рішень** — [H.1](#h1-рішення-revision-3). Детальний дизайн — [L](#l-dynamic-economy-management). Архітектурні рекомендації в L погоджено як напрямок майбутнього проєктування; конкретні schema/API/locking implementations не вважаються вже реалізованими або перевіреними. Deferred можливості не стають approved requirements лише через їх згадку; див. [H.2](#h2-майбутні-рішення-та-межі-погодження).
 
 ## Як використовувати цю специфікацію
 
@@ -42,6 +52,8 @@
 
 Це SHA прочитаного коду, не нової наскрізної перевірки. Fetch, тести, міграції й запуск інфраструктури під час аналізу не виконувалися. Посилання та номери рядків нижче стосуються цієї бази й можуть змінитися.
 
+Це історична база Revision 2. Для amendment Revision 3 перевірено Loyalty `origin/master` / ізольований detached checkout `723713861234696424fc2c1f93cca4510bebf674` та read-only backend `origin/main` `63cdbb0cfc9e7b04697807cd5de15141cbd23df4`. Початковий working tree нового checkout чистий; наявні гілки й сторонні зміни збережено. Fetch виконано, application tests та інфраструктура для цього documentation-only amendment не запускалися.
+
 ## B. Recovered Business Decisions
 
 Позначення джерел:
@@ -53,6 +65,8 @@
 - **C** — поточний код; це доказ реалізації, а не джерело нових бізнес-правил.
 
 ### B.1. Points economy
+
+Числа ставок і cap нижче — погоджена початкова конфігурація. Revision 3 дозволяє лише явні зміни для нових snapshots у межах [L.3](#l3-параметри-обмеження-та-формула); історичні snapshots не переоцінюються. Інші правила таблиці не стають редагованими автоматично.
 
 | Питання | Фінальне правило | Джерело / уточнення |
 | --- | --- | --- |
@@ -138,6 +152,8 @@ Redemption із кількох allocations дозволений. Частков�
 Qualification period і lifetime achievement progress — різні часові масштаби. Не використовувати один лічильник для обох.
 
 ### B.4. Birthday policy
+
+Revision 3 не робить birthday eligibility, ×2, gift або budget редагованими. Для custom rate/cap та нових non-birthday campaigns обидва counterfactual розрахунки нижче використовують однакові frozen значення з snapshot; узагальнення формули — [L.3](#l3-параметри-обмеження-та-формула). Формули з 200 нижче показують початкову конфігурацію.
 
 | Питання | Фінальне правило | Джерело / заміна |
 | --- | --- | --- |
@@ -276,7 +292,7 @@ Notification crash window встановлено за порядком коду,
 
 ### D.1. Module boundaries
 
-Залишити LoyaltyModule та AchievementsModule. Один обґрунтований новий модуль — PointsAccountingModule: його providers потрібні обом. Purchase, tier і birthday спочатку залишити providers усередині LoyaltyModule.
+Залишити LoyaltyModule та AchievementsModule. PointsAccountingModule потрібний обом для спільного accounting. Purchase, tier і birthday спочатку залишити providers усередині LoyaltyModule. Revision 3 додатково рекомендує невеликий EconomyPolicyModule для catalog/publication/selection і pure calculator, спільних для checkout та admin preview; межі й альтернативи — [L.2](#l2-концепції-та-власники-відповідальностей).
 
 ```mermaid
 flowchart TD
@@ -287,6 +303,8 @@ flowchart TD
     Loyalty --> Purchase[PurchaseRewardService]
     Loyalty --> Tier[TierProgressService]
     Loyalty --> Birthday[BirthdayPolicyService]
+    Loyalty --> Policy[EconomyPolicyModule]
+    Policy --> DB
     Loyalty --> Jobs[Schedulers and transport adapters]
     Achievements --> Reconcile[Achievement reconciliation]
     Achievements --> Intents[Durable intents and BullMQ worker]
@@ -308,6 +326,7 @@ flowchart TD
 | PurchaseRewardService | Payment facts, snapshot reference, pending reward, maturation, refund orchestration | Facts → entitlement/qualification/accounting; залежить від accounting, tier, birthday, achievement operations | Calculator не керує lifecycle і транзакціями |
 | TierProgressService | Periods, spending contributions, unique visit, tier guarantees | Чинні facts → metrics/grants; Prisma, чисті calendar functions | Один yearPoints counter не представляє money та історичні periods |
 | BirthdayPolicyService | Eligibility, anniversary identity, budget/gift ownership, correction policy | Customer/history/payment facts → eligibility/reservation; той самий tx | Policy має стан і concurrent budget, не лише multiplier |
+| EconomyPolicyModule | Immutable versions, authoritative selection, validated campaigns і calculation | Draft/publication або trusted checkout context → version/snapshot/preview; PG catalog і pure calculator | Admin та checkout мають використовувати одні правила; accounting не керує configuration lifecycle |
 | Achievements reconciliation | Progress, unlock/revoke, lifetime entitlement, restore | Поточна qualification → achievement state/accounting; не залежить від LoyaltyService | Increment-only worker не виправляє reordered/refunded contributions |
 | Transport/background adapters | Validation, admission/retry, quarantine, dispatch, batch/wake-up | Message/job → domain operation | Не повинні самі визначати entitlement або balance |
 
@@ -329,6 +348,7 @@ LoyaltyCalculatorService залишається для чистих обчисл
 | Birthday anniversary/reservation | Stable anniversary, frozen eligibility evidence, gift state, reserved/consumed budget, order owner |
 | Achievement entitlement | Unique userId/achievementId, original reward allocation, active/revoked state |
 | Customer facts | Account registration, DOB first-set, correction revisions і business timestamps |
+| Economy configuration | Policy/draft/version, activation schedule, campaign revisions, presets, audit та snapshot references; деталі в L, не окрема accounting schema |
 
 Pending reward і purchase entitlement можуть бути одним записом. Unique constraints захищають domain identity незалежно від transport eventId. Той самий source/revision з іншим payload — конфлікт, а не нове нарахування.
 
@@ -434,6 +454,8 @@ profile
 
 Async TicketPurchased підтверджує paid fact, але не створює snapshot заднім числом. До початку конкретної payment attempt зберігаються policy version, tier/rate/promo, eligibility evidence, expected reward та birthday reservation з order/attempt ownership і `policyFixedAt`.
 
+Revision 3 деталізує вибір version, emergency controls, immutable payload і cross-service recovery в [L.6](#l6-checkout-snapshot-versioning-та-recovery). Це не заміна погоджених шести кроків нижче й не дозвіл змінювати вже fixed умови при publication або campaign expiry.
+
 1. Підготовка дає 15 хвилин на початок платежу. Exact replay не пересуває deadline.
 2. Якщо платіж не почато вчасно, reservation звільняється; продовження потребує нового snapshot за актуальними умовами.
 3. Початок платежу і expiry/release узгоджуються durable transitions. Факт початку зберігається до network call; recovery має враховувати crash у цьому проміжку. DB locks не тримаються під час мережі.
@@ -487,9 +509,13 @@ U — unit; PG — реальний PostgreSQL; T — real transports; E2E — �
 
 I-01 потребує явних read semantics: cached profile balance може вимагати expiry-актуалізації; API не повинен видавати stale projection за guaranteed spendable balance.
 
+Revision 3 не перенумеровує й не дублює цей каталог. Додаткові configuration/publication guarantees та їхні перевірки зібрано в [L.11](#l11-verification-та-додаткові-configuration-invariants).
+
 ## F. Detailed Roadmap
 
 Вісім етапів зберігаються. Немає окремого великого refactor stage: зміни відповідальностей виконуються разом із відповідними правилами. PR boundaries нижче практичні, а не обов’язкова кількість PR.
+
+Revision 3 розширює Stage 4, не перезапускає Stages 2/3. На базі цього amendment PR #31–34 уже додали dormant allocations, restoration, availability та durable expiry; це не доказ завершеного coordinated writer cutover. Policy design не змінює їхні source identities, conservation або transaction ownership.
 
 ### Етап 1. Authoritative business facts і contracts
 
@@ -567,15 +593,15 @@ I-01 потребує явних read semantics: cached profile balance може
 
 **Залежності:** 1–2. **Виключено:** cash collection, partial refunds. **Ризик:** aggregate-only debt недостатній; зворотні settlements потребують окремого уважного review.
 
-### Етап 4. Post-screening earning і нова economy
+### Етап 4. Post-screening earning та Dynamic Economy Management
 
 **Проблема:** поточний consumer одразу видає reward за поточними умовами.
 
-**Правила/scope:** pending → issued/cancelled; issued → reversed; ticket-only paid money; 3/4/5%, highest promo, floor, cap 200; mixed-payment earning; minimum redeem 25/maximum 50%; immutable snapshot.
+**Правила/scope:** pending → issued/cancelled; issued → reversed; ticket-only paid money; початкові 3/4/5% і cap 200 з versioned configuration у межах R3; highest promo, один floor; mixed-payment earning; fixed minimum redeem 25/maximum 50%; immutable snapshot. Детальна єдина специфікація configuration — L.
 
-**Target/data:** PurchaseRewardService і чистий calculator; pending state у PG; completion запускає maturation. BullMQ job — wake-up, а scanner відновлює роботу з DB після втрати jobs.
+**Target/data:** PurchaseRewardService і version-aware pure calculator; EconomyPolicyModule, published catalog/schedule/audit та PG snapshots; completion запускає maturation. BullMQ job — wake-up, а scanner відновлює роботу з DB після втрати jobs. Policy activation визначається DB selection, не scheduler tick.
 
-**Файли:** purchase service/DTO, calculator/constants, schema, scheduler/processor; backend checkout/payment facts.
+**Файли:** майбутні policy providers/DTOs та admin adapters; purchase service/DTO, calculator/constants, schema, scheduler/processor; backend checkout/snapshot contracts. Окремі schema/API зміни потребують implementation proposals. Admin frontend — окремий дозволений repository scope майбутнього task, не зміни цього documentation task.
 
 **Контракти:** погоджений snapshot/authorization protocol із D.7. Чинний preview не є reservation. DB transaction не охоплює payment RPC.
 
@@ -585,13 +611,51 @@ I-01 потребує явних read semantics: cached profile balance може
 
 **Тести:** unit rates/caps/rounding; PG maturity/refund race; Redis recovery; E2E before-end і delayed delivery.
 
-**Acceptance:** reward до completion недоступний; після — один ефект за snapshot; pre-issuance refund не створює reward/debt; delayed delivery не змінює ставку.
+**Acceptance:** reward до completion недоступний; після — один ефект за snapshot; pre-issuance refund не створює reward/debt; delayed delivery, policy supersession і campaign expiry не змінюють frozen результат. Policy publication, unsafe values і stale selection перевірені за L.11.
 
-**PR boundaries:** pending lifecycle/snapshot contract; new calculator/redemption та завершена checkout integration.
+**Reviewable workstreams:** нижче — dependency order, а не вимога зробити один PR на весь workstream. Кожен PR має залишати dormant або завершену безпечну межу; неповна economy не активується.
+
+#### 4A. Versioned Policy Model and Calculator
+
+- **Мета/scope:** immutable published payload, draft revision, parameter validation та version-aware pure calculation; початкова Normal Economy.
+- **Prerequisites:** approved R3 та прочитані source contracts. Dormant model/calculator можна готувати паралельно зі Stages 2/3; вони не замінюють accounting.
+- **Exclusions:** active writers, admin UI, live checkout, provider calls.
+- **Ризик:** відмінність preview і runtime calculation або непомітна зміна floor/cap/birthday extra.
+- **Acceptance/tests:** спільні fixed fixtures, bounds і counterfactual birthday tests проходять як unit; real PG доводить immutable publication, identity/replay і rollback.
+
+#### 4B. Campaign Rules, Scheduling and Selection
+
+- **Мета/scope:** залежить від 4A; typed targeting, once/weekly windows, activation timeline, selection revisions та global emergency disable.
+- **Exclusions:** arbitrary rules/recurrence engine, новий scheduler, live reward issuance.
+- **Ризик:** stale policy на boundary, повторне ввімкнення disabled campaign або неправильний DST occurrence.
+- **Acceptance/tests:** deterministic max/ties, `[start,end)`, current DB time, без залежності від tick; unit calendar + PG publication/selection/disable races, restart і changed-timezone-rules cases.
+
+#### 4C. Admin API, Presets, Auditing and Preview
+
+- **Мета/scope:** залежить від 4A/4B; trusted Admin boundary, draft CRUD, validation, manual simulator, publication/scheduling/cancellation, two preset types і audit/history.
+- **Exclusions:** real-user simulator, separate permission system, two-person approval, accounting mutations.
+- **Ризик:** forged actor, lost update, duplicate publish або прихований overwrite при apply preset.
+- **Acceptance/tests:** actual HTTP → trusted internal API authorization/validation, PG optimistic concurrency/idempotency/audit rollback, simulator side-effect checks; browser credentials не відкривають internal gRPC.
+
+#### 4D. Checkout Snapshot Integration and Post-screening Earning
+
+- **Мета/scope:** 4A/4B, Stage 1 facts та готовий accounting Stages 2/3; idempotent prepare/start/outcome protocol, persisted snapshot reference в Orders, pending reward/maturation/reversal integration.
+- **Exclusions:** real provider adapters, активація неповної birthday/tier моделі. Повна birthday reservation integration завершується в Stage 6, а не підміняється fake eligibility.
+- **Ризик:** charge без durable snapshot, ambiguous commit/start або delayed outcome з переобраними умовами.
+- **Acceptance/tests:** backend і Loyalty PG fault/concurrency tests, real gRPC/RMQ compatibility та pinned-pair E2E з Unknown, lost response, refund-before-maturity, completion-before-purchase і policy supersession. Accounting/source/ledger effects атомарні; wire fields не реконструюють історію.
+
+#### 4E. Admin Dashboard and Near-real-time Updates
+
+- **Мета/scope:** залежить від 4C; current/scheduled/history views, diff/preview, presets і polling. Може розроблятися паралельно з 4D після готовності API.
+- **Exclusions:** customer UI redesign, WebSockets/SSE, прямий browser → internal service доступ, financial activation.
+- **Ризик:** екран видає застаріле або simulated значення за committed/current state.
+- **Acceptance/tests:** UI/integration tests для 10-second polling, immediate own-action refresh, stale/offline status, concurrent-edit conflict і reconnect; server-side authorization залишається обов’язковою.
 
 **Уточнення H-1/H-7:** тестувати tier/date change після snapshot, початок перед deadline/на межі, повтор prepare без продовження строку, crash перед network call, Unknown і delayed confirmation. Своєчасно початий платіж не втрачає умови після 15 хвилин; відновлення не залежить лише від Redis job.
 
 **Залежності:** 1–3 і погоджені H-1/H-7. **Виключено:** повний birthday policy і tier lifecycle. **Ризик:** не активувати цей stage зі старими несумісними tier/promo assumptions.
+
+Це залежності бізнес-інтеграції 4D; dormant 4A–4C не вимагають перезапуску або завершення всієї попередньої роботи. Готовність UI не доводить готовність earning. Фінальна activation залишається в Stage 8 після залежних Stages 5–7; вона потребує окремого дозволу.
 
 ### Етап 5. Personal periods і tier lifecycle
 
@@ -617,6 +681,8 @@ I-01 потребує явних read semantics: cached profile balance може
 
 **Залежності:** 1, 3–4, погоджені H-2/H-3/H-9/H-11. **Виключено:** GOLD benefit redesign. **Ризик:** current metrics не замінюють історичну підставу grant; пізній факт не створює зайвий рік.
 
+**Revision 3:** policy може прочитати authoritative tier для нового snapshot, але зміна earning rate не змінює qualification thresholds 12/3600 та 24/7200, personal periods або grants. Historical qualification/grant basis і вже fixed purchase policy зберігаються незалежно від поточної configuration.
+
 ### Етап 6. Birthday eligibility, budgets і corrections
 
 **Проблема:** чинний grant не має eligibility evidence або budget ownership.
@@ -640,6 +706,8 @@ I-01 потребує явних read semantics: cached profile balance може
 **PR boundaries:** anniversary/eligibility/DOB policy; checkout reservations і lifecycle.
 
 **Залежності:** 1–5, payment protocol. **Виключено:** KYC/fingerprinting, гарантія на одну фізичну особу. **Ризик:** multi-account abuse обмежений, не усунений; historical evidence reconciliation потрібна явно.
+
+**Revision 3:** BirthdayPolicyService використовує frozen rate/cap/campaign context для обох counterfactual розрахунків; eligibility/budget/gift залишаються stateful й не редагуються policy editor. Нове промо не створює другого entitlement, не повертає consumed budget і не доповнює старі snapshots. Full Stage 6 integration закриває відповідну залежність 4D до activation.
 
 ### Етап 7. Achievements progress/revoke/requalification
 
@@ -673,7 +741,7 @@ I-01 потребує явних read semantics: cached profile balance може
 
 **Target/files:** чинні integration/transport runners, fixtures, mappers, CI, наявна setup/reliability документація. Не додавати нову інфраструктуру заради test orchestration.
 
-**Контракти:** фінальна .NET/proto/events перевірка. Старі поля не отримують новий прихований зміст. Frontend/UI implementation поза цим roadmap, але API має бути пояснюваним для клієнта.
+**Контракти:** фінальна .NET/proto/events перевірка, з policy/snapshot references та calculator compatibility. Старі поля не отримують новий прихований зміст. Revision 3 явно додає лише economy admin dashboard із 4E; customer UI redesign лишається поза roadmap.
 
 **Інваріанти:** весь каталог E, з existing GOLD/idempotency/outbox regressions.
 
@@ -684,6 +752,8 @@ I-01 потребує явних read semantics: cached profile balance може
 **Acceptance:** 0 failures і exit code 0 кожного runner; немає accounting bypass writer; repeated messages converge; описані зовнішні межі й mock payment behavior.
 
 **PR boundary:** integration/activation PR на сервіс із фактичними результатами.
+
+**Revision 3 gates:** [L.11](#l11-verification-та-додаткові-configuration-invariants): concurrent publication, activation/DST boundaries, emergency disable/resume, stale caches/Redis outage, lost prepare/publish response, Unknown payment across campaign expiry, historical snapshots/calculator versions та admin authorization/polling. Real PG/transports і paired E2E потрібні там, де заявляються cross-service guarantees. Симуляція або UI refresh не замінюють ці gates.
 
 **Залежності:** 1–7 та закриті blocking H. **Виключено:** production deployment/readiness certification. **Ризик:** mock payment не перевіряє реального provider-а; прибутковість окремо.
 
@@ -753,6 +823,8 @@ Proto checks потрібні при зміні proto. Install/codegen — ті�
 Reset, очищення queues/jobs і deployment не авторизовані цим документом. Не торкатися сторонніх ресурсів. Порядок реалізації не дорівнює порядку business activation: факти/accounting можуть land раніше, погоджена economy активується після завершення 1–7 і verification 8. Складний feature-flag framework не потрібний.
 
 Clean baseline не означає автоматичного видалення Prisma migration history. Існуючі migrations можна застосувати до порожньої DB; squash окремо не потрібний. Legacy reconciliation лише для старих disposable balances не проєктувати.
+
+Revision 3 потребує сумісних snapshot producer/consumer і підтримки calculator/format versions усіма потрібними replicas до publication таких versions. Mixed deployment зі старим prepare path не гарантує нову економіку. Не реконструювати snapshots для історичних orders із поточної policy. Accounting cutover, policy activation і deployment — різні погоджувані дії.
 
 ## G. Architecture Decision Recommendations
 
@@ -827,7 +899,59 @@ Clean baseline не означає автоматичного видалення
 
 Фінансова sustainability потребує фактичної маржі, redemption rate, вартості premium upgrades та загального reward cost. Це окрема оцінка; погоджені 3/4/5% не є доказом прибутковості.
 
+### H.1. Рішення Revision 3
+
+27 питань погоджено індивідуально в інтерактивному brainstorming; після консолідованого дизайну користувач явно дозволив оновлення Revision 3. Статус рядків — **Approved product decision**, не implementation status. R3 IDs незалежні від незмінених H-1…H-16.
+
+| ID | Погоджене рішення |
+| --- | --- |
+| R3-01 | MVP editor керує tier earning rates, reward cap і кампаніями; redemption 25/50% fixed |
+| R3-02 | Calendar promotion eligibility за `policyFixedAt`; Weekend — субота/неділя Europe/Kyiv |
+| R3-03 | Негайна або scheduled activation після validation і preview |
+| R3-04 | Усі economy actions доступні authenticated Admin; actor/reason/audit/concurrency protection обов’язкові; окремі permissions/two-person approval не потрібні в MVP |
+| R3-05 | Preset копіюється в draft без live link; його зміни/архівація не змінюють drafts, versions чи snapshots |
+| R3-06 | Dashboard polling кожні 10 секунд, own-action refresh одразу; UI не визначає authoritative policy |
+| R3-07 | Hard limits контролюються окремо; Admin не підвищує їх через policy editor |
+| R3-08 | `BRONZE ≤ SILVER ≤ GOLD`; рівність базових ставок дозволена |
+| R3-09 | Максимальна base earning rate — 5% для кожного tier |
+| R3-10 | Максимальний campaign multiplier — ×2; birthday ×2/premiere ×1,5 збережені |
+| R3-11 | Максимальний основний reward cap — 200; нижче значення дозволене для нових snapshots |
+| R3-12 | Base rates додатні, cap — integer 1…200; 0% і cap 0 заборонені |
+| R3-13 | Initial Normal Economy не активує Weekend Boost; recurring campaign потребує publication |
+| R3-14 | Weekend Boost preset — ×1,25; редагований у draft у межах hard limit, не автоматично active |
+| R3-15 | Once interval і weekly recurrence з необов’язковим завершенням; monthly/yearly/exceptions deferred |
+| R3-16 | Targeted promotion може дати нижчому tier більший effective reward; base rates залишаються monotone |
+| R3-17 | Targeting MVP: time, tier list, session type, explicit session IDs; між фільтрами AND, у списках OR; порожнє обмеження — всі відповідні значення |
+| R3-18 | Base version діє до наступної activation; повернення конфігурації — нова publication, без temporary-policy fallback |
+| R3-19 | Immediate publication не скасовує майбутні activations; preview показує timeline, cancellation — окрема audited дія |
+| R3-20 | Emergency disable блокує campaignId у всіх нових selections, включно з future policies/recurrence, до explicit resume; fixed snapshots збережені |
+| R3-21 | Усі calendar campaigns MVP — Europe/Kyiv, UTC instants у storage; GOLD UTC-month не змінюється |
+| R3-22 | Ambiguous/nonexistent local boundaries відхиляються; DST crossing всередині однозначного interval дозволений |
+| R3-23 | Highest multiplier збережено; без manual priority, stable ruleId розв’язує ties без зміни reward |
+| R3-24 | Campaign revisions входять у повну immutable policy version; звичайне редагування campaign потребує нової policy publication |
+| R3-25 | Неперевірена актуальність policy → temporary failure нового prepare, без charge; verified PG path дозволений при Redis outage; fixed Unknown attempts не переоцінюються |
+| R3-26 | Economy preset для base rates/cap і Campaign preset для акції; apply показує diff; повну published policy можна clone у новий draft |
+| R3-27 | Manual simulator MVP: hypothetical context і explicit birthday/budget assumptions; немає grants, reservation або authoritative real-user entitlement |
+
+Окремо погоджено консолідований архітектурний напрямок L: невеликий policy module, PG authority, version-aware calculator, Loyalty-owned snapshots із references в Orders, точність ставок 0,01 процентного пункту/multiplier 0,01 та fail-closed resolution після timezone-rules changes. Це design constraints для майбутніх SDD proposals, не твердження про готовий implementation.
+
+### H.2. Майбутні рішення та межі погодження
+
+Нових блокувальних продуктових питань для погодженого MVP немає. Наступні альтернативи навмисно **не погоджені до реалізації**; їх розглядають лише за окремого запиту, а не використовують для повторного відкриття R3.
+
+| Майбутнє питання | Реалістичні варіанти | Поточний рекомендований default / tradeoff | Що зачіпає; чи блокує MVP |
+| --- | --- | --- | --- |
+| Підвищувати hard limits? | Залишити 5%/×2/200; окремо погодити нові bounds після економічної оцінки | Залишити поточні: менший ризик, менше свободи | R3-07,09–12; ні, підвищення заблоковане без нового approval |
+| Додати live-user simulation? | Manual only; read-only authoritative customer mode | Manual only; real mode потребує privacy/authorization та Stages 5/6 facts | R3-27, H-8; ні, блокує лише новий mode |
+| Потрібні розширені admin permissions? | Any Admin; окремі editor/publisher permissions; two-person approval | Any Admin в MVP; accepted broader trust, audit не замінює separation of duties | R3-04; ні, інша модель потребує нового approval |
+| Потрібен push dashboard? | Polling; SSE + polling fallback; WebSockets | Polling 10 s; push лише за виміряної потреби, не correctness dependency | R3-06; ні |
+| Потрібні складні schedule/targeting? | Once/weekly Kyiv + current filters; bounded нові typed rules; general engine | Залишити current scope; розширення typed rules краще за DSL, але потребує нових calendar/fact decisions | R3-15,17,21–22; ні, нові filters/calendar patterns поки unavailable |
+
+Конкретні API/DB names, transaction timeouts, operational retention і migration design визначаються окремим implementation review. Вони не дозволяють змінювати approved financial rules. При несумісності serializer, calendar rules або existing transaction guarantees наступний task має показати blocker, а не вигадати business fallback.
+
 ## I. Recommended First PR
+
+Історичний first-PR plan Revision 2 збережено для traceability; це не доручення повторити вже merged implementation. Revision 3 не повертає roadmap до Stage 1.
 
 Перший вузький PR — авторитетний immutable payment fact у моноліті:
 
@@ -881,4 +1005,343 @@ feat(orders): persist authoritative loyalty payment facts
 
 Кожен task має назвати stage/PR boundary, залежні approved H-рішення, exact base SHA, allowed repositories, незмінні contracts та інваріанти, потрібні tests і activation scope. Перед роботою прочитати актуальні AGENTS.md та цей документ, перевірити actual working tree й code evidence. H-1…H-16 закриті; нову неоднозначність або суперечність потрібно показати явно, а не перевідкрити всі погоджені правила.
 
+Для Economy Management task додатково назвати R3-рішення з H.1, workstream 4A–4E, policy/selection/snapshot ownership та gates L.11. Архітектурна схема не є дозволом реалізувати весь Stage 4; цей amendment не запускає наступний stage автоматично.
+
 Не починати весь roadmap за одним загальним погодженням. Не включати файли аудиту чи сторонні local changes автоматично. Не переписувати assertions лише для green suite. Зміна погодженого правила оформлюється як явне рішення, а не прихований implementation shortcut.
+
+## L. Dynamic Economy Management
+
+### L.1. Статус, scope та code evidence
+
+Це цільовий дизайн Revision 3, а не опис deployed capability. Продуктові рішення — H.1; архітектурний напрямок погоджено в консолідованому дизайні, деталі реалізації потребують окремих SDD proposals. Мінімальна мета: одна відтворювана конфігурація для preview і кожної покупки, керована Admin без перевизначення accounting.
+
+Перевірені implementation boundaries на SHA з A:
+
+- [LoyaltyCalculatorService](../src/loyalty/loyalty-calculator.service.ts) і [constants](../src/loyalty/constants/loyalty.constants.ts) містять legacy computation. Їхні birthday-week/stacking semantics не є approved target rules; наявність коду не погоджує новий продукт.
+- [LoyaltyController](../src/loyalty/loyalty.controller.ts) захищений [GrpcApiKeyGuard](../src/guards/grpc-api-key.guard.ts). `x-api-key` автентифікує internal service, не роль кінцевого Admin. [AdminLoyaltyService](../src/loyalty/admin-loyalty.service.ts) зараз виконує points/VIP operations, а не policy publication.
+- Backend `src/Host/Cinema.Api/Controllers/AdminLoyaltyController.cs` має `[Authorize(Roles = "Admin")]`; `src/Cinema.Infrastructure/Services/GrpcLoyaltyService.cs` додає internal credentials server-side. Цей trust boundary можна розширити; browser не отримує його secrets. Нові policy actions не повинні використовувати fallback actor `UnknownAdmin`.
+- [points-allocation.ts](../src/loyalty/points-allocation.ts), [Prisma models](../prisma/schema.prisma) і merged PR #31–34 уже представляють dormant grant/funding/restoration/extension/availability/expiry foundation. Policy не змінює ці історії, counters, profile locks або source conservation.
+- Поточний proto містить balance/admin/preview operations, але не весь lifecycle D.7. Не видавати існуючий discount preview за immutable checkout snapshot або готовий policy management API.
+
+Поза цим amendment: будь-яка реалізація, зміна schemas/contracts, активація workers/writers, historical backfill, provider integrations або deployment. Під час редагування Revision 3 application tests не запускалися.
+
+### L.2. Концепції та власники відповідальностей
+
+Для MVP достатньо однієї платформної EconomyPolicy identity, а не довільних tenant/segment policy selectors. Концепції нижче не вимагають окремої таблиці для кожного noun.
+
+| Концепція | Мінімальна відповідальність / lifecycle |
+| --- | --- |
+| EconomyPolicy | Stable policyId; групує drafts і published versions однієї економіки |
+| Draft configuration | Mutable draftId + optimistic revision, base version reference, typed payload; edit → validate/preview → publish або archive |
+| PolicyVersion | Stable version identity, immutable canonical payload/hash, schema/calculator version, campaign revisions, publisher/reason/time. Published version не редагується й не видаляється через archive |
+| Published configuration | Повна перевірена base configuration і pinned campaign definitions. Published не означає active: version може бути scheduled, superseded або взагалі не selected |
+| ActivePolicySelection | Durable activation timeline, cancellation evidence, concurrency generation та campaign disable/resume controls. Це authority вибору, не лише cached active pointer |
+| Campaign | Stable campaignId, immutable revision у published payload, typed multiplier/eligibility/schedule. Редагування draft не змінює published revision |
+| Preset | Mutable reusable template із власною revision; typed Economy або Campaign; не active policy і не reference для runtime calculation |
+| PolicySnapshot | Immutable result конкретного prepare: policy/selection identities, trusted context, frozen rules/result і attempt ownership; lifecycle платежу зберігається поруч, не переписує payload |
+| Policy history / audit | Append-only publication, schedule/cancel, disable/resume та їх actor/reason/before-after evidence; потрібні для recovery і пояснення історичного результату |
+
+Base policy задає ставки/cap. Campaign — додаткова умовна multiplier rule. Preset лише прискорює створення draft. Published version — перевірений immutable bundle, а snapshot — застосування цього bundle і чинних control decisions до однієї покупки. Ці identities не взаємозамінні.
+
+**Ownership:**
+
+- Loyalty володіє validation/evaluation, publication/selection і immutable snapshot; Accounting — issuance/redemption/restoration/expiry/debt. Policy calculator не пише financial state.
+- Orders володіє order/ticket lifecycle, authoritative checkout inputs, payment-attempt correlation і збереженим snapshot reference перед зовнішньою оплатою.
+- Future Payments володіє provider calls, attempts, idempotency та authoritative outcome evidence. Policy engine не запитує provider і не перетворює timeout на decline.
+- Admin frontend відображає committed/draft state та викликає authorized backend operations; не визначає права користувача, розмір charge або authoritative selection.
+
+**Архітектурні альтернативи:** extension існуючих LoyaltyService/Calculator — найменший початковий diff, але змішує admin lifecycle з purchase/accounting orchestration. Рекомендований EconomyPolicyModule локалізує catalog/selection і pure calculator, потрібні кільком callers. Окремий deployable service створив би додаткові network/recovery boundaries без потреби. Немає generic repositories, CQRS/event sourcing, executable DSL або нової інфраструктури.
+
+Legacy calculator/writers не перемикаються частково. Version-aware calculator повертає deterministic result з явних inputs; orchestration окремо бере facts/locks і зберігає snapshot або accounting result. Точні provider/file names затверджуються в implementation PR.
+
+### L.3. Параметри, обмеження та формула
+
+| Parameter group | Класифікація | Початкове значення / дозволена межа |
+| --- | --- | --- |
+| Tier earning rates | Configurable MVP | BRONZE 3%, SILVER 4%, GOLD 5%; кожна >0 і ≤5%, `BRONZE ≤ SILVER ≤ GOLD` |
+| Main purchase reward cap | Configurable MVP | Початково 200; integer 1…200, після multiplier/floor; не cap gift/achievement rewards |
+| Campaign multiplier/context | Configurable MVP | Multiplier від ×1 до ×2 з точністю 0,01; ×1 не дає extra, preview це пояснює. Tier/time/session filters і schedule — L.4 |
+| Redemption minimum / maximum | Fixed current rules | 25 points / 50% eligible purchase amount; не поля policy editor |
+| Eligible earning categories | Fixed MVP; розширення потребує product approval | Лише ticket cash component. Немає food/drinks; category/seat/movie/hall targeting поза R3-17 не додається автоматично |
+| Birthday multiplier, gift, budget, eligibility | Fixed current rules | ×2, gift 25, extra budget 100 та B.4/H; не редагуються як campaign fields |
+| Premiere/special rule | Fixed current rule | ×1,5. Окремий Premiere Week campaign може мати власний multiplier у bounds, але не редагує built-in rule |
+| Rounding, promo combination | Fixed financial invariants | Один floor, cap main reward, highest multiplier; stacking немає |
+| Expiry/FEFO/restoration/debt | Fixed current rules | B.2/H/accounting; не policy knobs |
+| Qualification, GOLD, birthday entitlements | Fixed current rules | B.3–B.5a; ставка reward не є threshold кваліфікації |
+| Додаткові filters, yearly recurrence, multi-timezone | Later iteration + product approval | Не можна публікувати як unknown/ignored fields |
+| Підвищення hard limits | Requires new product approval | Окрема контрольована зміна bounds; не кнопка в policy editor |
+
+Рекомендована representation: exact decimal/fixed-point arithmetic; ставки редагуються з точністю **0,01 процентного пункту** (0,01%…5,00%), multiplier — **0,01**. Input не приймає NaN/Infinity, implicit rounding, negative/unknown enum values або довільні expressions. Умовні monetary amounts — exact decimal/minor units із currency; відповідність authoritative charge inputs обов’язкова. Points/cap — integers, перевіряються numeric bounds downstream accounting/proto, без автоматичної зміни їх типів.
+
+Hard limits — server-side guardrails поза редагованим payload. Version фіксує використані значення та validation/calculator compatibility, але Admin не може розширити limits через JSON. Звуження bounds у майбутньому не є дозволом змінити вже fixed reward; підтримка historical versions має бути явно збережена.
+
+Для eligible paid money `P`, frozen rate `r`, frozen cap `C` і non-birthday matching campaigns:
+
+```text
+Mnormal = max(1, fixedPremiereMultiplierIfApplicable, matchingCampaignMultipliers)
+normalReward = min(C, floor(P × r × Mnormal))
+withBirthday = min(C, floor(P × r × max(Mnormal, 2)))  // лише за birthday eligibility
+requestedBirthdayExtra = withBirthday - normalReward
+reservedBirthdayExtra = min(requestedBirthdayExtra, availableAnniversaryBudget)
+purchaseReward = normalReward + reservedBirthdayExtra
+```
+
+Без birthday eligibility `purchaseReward = normalReward`. Обидва counterfactual calculations використовують ті самі `P/r/C` і non-birthday rules із snapshot. Budget reservation виконує BirthdayPolicyService під profile lock, не pure calculator. Змішані payments дають reward тільки на cash component; points used не віднімаються вдруге з уже net cash amount. Gift перевіряється окремо, не додається simulator-ом без відповідного explicit context.
+
+Нижчий tier може мати більший effective rate завдяки targeting; ієрархія стосується лише base rates. Нульова eligible cash amount дає нуль основної reward, навіть коли ставки додатні; це не fabricated monetary payment. Жодна policy не видає points до qualifying completion і не створює джерело з historical aggregate balance.
+
+### L.4. Campaign model, scheduling та eligibility
+
+Campaign payload мінімально містить:
+
+- campaignId/revision; display name/description; typed promotion kind **Multiplier**;
+- enabled flag у configuration, multiplier і optional tier/session-type/session-ID filters;
+- once або weekly schedule, overall activation bounds, Europe/Kyiv timezone;
+- stable ruleId, canonical payload/hash і revision audit references. RuleId не змінюється через перейменування;
+- посилання на emergency control revision у selection result, а не mutable override всередині published payload.
+
+Weekend Boost, Holiday Event, Premiere Week, Temporary Loyalty Boost і tier-specific campaign — різні налаштування цієї ж typed model, не окремі довільні engines. Food earning, price discounts, fixed gifts, budget pools або scripts не з’являються як додаткові promotion types без нового рішення.
+
+**Calendar semantics:**
+
+1. Інтервали half-open `[start,end)`: точний start включено, точний end виключено. Once має однозначні start/end; end > start. Weekly задає явні weekday/time windows, включно з переходом через midnight/week boundary, та overall start із optional end. Outside overall bounds campaign не застосовується.
+2. Weekend preset: субота 00:00 включно → понеділок 00:00 виключно, Europe/Kyiv. ×1,25, disabled у початковій Normal Economy; після publication recurring campaign не потребує ручного запуску щотижня.
+3. Start/end instants і конкретні occurrences обчислюються за IANA timezone rules, а не додаванням 48 UTC-годин або фіксованим offset. Spring/fall crossings усередині interval дозволені.
+4. Ambiguous або nonexistent local boundaries відхиляються, без автоматичного shift/подовження/вибору fold. Publication перевіряє recurring rule проти відомих DST transitions і майбутніх правил доступної timezone database, не лише найближчого occurrence.
+5. Безстроковий recurrence не означає обіцянки знати нескінченне майбутнє. Зберігаються calendar rule/timezone і resolution metadata; після timezone-rules update майбутні occurrences перевіряються повторно. Якщо affected eligibility неможливо визначити однозначно, new prepare завершується temporary failure до correction. Не пропускати кампанію мовчки як ineligible. Fixed snapshots уже мають resolved interval/offset context і не переоцінюються.
+6. Час schedule eligibility — authoritative `policyFixedAt`, не payment start/confirmation, session date, worker time або browser clock. Session type/identity — trusted context від Orders, frozen тоді ж. Reschedule або зміна metadata після snapshot не переобирає promo; cancellation/refund/неqualifying completion усе одно можуть скасувати сам reward за чинними правилами.
+
+Фільтри AND між dimensions, OR усередині списку; empty restriction означає all відповідних values, не unknown. Невідомі source facts не є доказом false eligibility: якщо без них не можна коректно обрати reward, prepare тимчасово відхиляється. Reference до неіснуючого session або невідомого типу не приймається як валідний admin input. Не дублювати визначення session type в frontend.
+
+**Manual activation:** Admin створює/вмикає campaign у draft і публікує policy негайно або на дату. Це не пряме редагування active payload. Scheduled campaign автоматично перестає match за end boundary, навіть якщо background notification запізнився.
+
+**Safe deactivation:** звичайна publication змінює campaign для обраної policy version. Emergency disable створює durable campaignId-wide suppression із actor/reason/control revision та підвищує selection generation. Він діє також на вже scheduled майбутні policies до explicit resume. Resume не переносить dates і не оживляє expired campaign; потрібні і чинний interval, і enabled rule у selected version. Archive не стирає immutable history. Birthday та premiere built-ins не вимикаються через control звичайного campaignId.
+
+### L.5. Promotion conflicts та stacking
+
+Approved default — **highest applicable multiplier**. Жодна campaign priority не обходить це правило. За рівності stable canonical ruleId визначає attribution, а snapshot/explanation зберігає всі matching rules; identical maximum не нараховується двічі. Admin не може змінити tie-breaker перейменуванням кампанії.
+
+| Комбінація | Погоджений результат |
+| --- | --- |
+| Weekend ×1,25 + premiere ×1,5 | ×1,5 |
+| Weekend ×1,25 + birthday ×2 | Birthday candidate ×2, extra обмежується B.4 budget |
+| Birthday ×2 + premiere ×1,5 | ×2 candidate; extra — різниця двох floored/capped results |
+| Кілька scheduled campaigns | Найбільший matching multiplier, інтервали/filters визначені за одним cutoff |
+| Tier-specific + global | Той самий max; targeting не створює окремого множника для stacking |
+| Однакові multiplier / уявний однаковий priority | Manual priority у MVP немає; stable ruleId, незмінна сума |
+| Кампанії різних Admin | Actor не дає precedence; version bundle, schedule, eligibility і max визначають результат |
+
+| Варіант моделі | Економічні / implementation / test наслідки | Статус |
+| --- | --- | --- |
+| A. Highest multiplier | Простий bounded результат, детермінований max; тести eligibility/ties/birthday counterfactual | Погоджено, MVP |
+| B. Explicit compatible groups | Потрібні правила сумісності груп, порядок між групами, budget attribution і нові cap examples; комбінації тестів ростуть | Не погоджено; тільки новий product amendment |
+| C. Multiplicative stacking | ×1,25 ×1,5 ×2 = ×3,75 до cap; суттєво інша economics, birthday budget/counterfactual та snapshot schema semantics | Не погоджено; не реалізовувати |
+
+Hard limit ×2 стосується дозволеного multiplier MVP; його не обходять групами, повторенням rules або окремим birthday multiplication. Cap застосовується після обраного multiplier й одного floor; gift/achievement cap semantics не змінюються.
+
+### L.6. Checkout snapshot, versioning та recovery
+
+**Publication → selection:** draft validation/preview використовують конкретні draft revision і current selection revision. Publish атомарно зберігає immutable version, activation instruction і audit. Version eligible лише коли її publication committed, activation не cancelled і effectiveAt ≤ decision time. Immediate effectiveAt задає DB, не client; backdated publication, що змінює минулі покупки, заборонена.
+
+Одна base version вибирається за останньою чинною activation до cutoff, не за найбільшим version number. Однаковий activation instant не має прихованого winner: conflicting schedule changes відхиляються через optimistic concurrency/constraint і потребують explicit resolution. Immediate publication зберігає майбутні activations; preview показує, коли нова конфігурація буде замінена. Cancel запланованого переходу зберігає evidence/version. Rollback — нова publication копії старого payload з повторною validation; чинні emergency suppressions не обходяться таким копіюванням.
+
+**Prepare → payment → issuance:**
+
+1. Orders володіє stable order/paymentAttempt identity і authoritative quote inputs: user/session, eligible cash amount/currency, pointsUsed, relevant ticket context. Не бере rate/cap/actor або cash facts із довільного browser payload. Зміна економічно значущих inputs потребує нового prepare; не перезаписує old attempt.
+2. Orders викликає idempotent prepare поза DB locks. Loyalty у short transaction бере existing profile lock для stateful eligibility/reservations, потім узгоджений selection lock; authoritative clock читається після необхідних locks. Усі prepare writers дотримуються одного порядку. Publication/control writers беруть selection lock і не запитують profile lock. Точний SQL/order має пройти PG concurrency proof до implementation acceptance.
+3. Loyalty атомарно обирає published bundle/control revisions, обчислює результат і зберігає immutable snapshot та належні reservations. `policyFixedAt` — збережений decision instant успішно committed prepare, не точний фізичний DB commit timestamp. Блокування не продовжує старий deadline при replay.
+4. Orders durably зберігає snapshotId/reference/hash і потрібні frozen facts до provider call. Cross-service prepare/start ownership protocol узгоджує початок до 15-minute deadline з expiry/release за D.7; network calls не виконуються під PG locks. Якщо response втрачений після prepare commit, той самий command key повертає той самий snapshot. Якщо commit/start outcome невідомий, recovery читає stable identities, а не виконує нову оплату чи новий prepare навмання.
+5. Timely started attempt зберігає snapshot при policy supersession, campaign end, emergency disable і Unknown. Нерозпочатий вчасно attempt потребує release/new prepare; reprepare не переписує old history. Невідомий початок або payment outcome спершу reconcile, не вважати їх доведеним decline. Точний boundary start/release перевіряється узгодженим D.7 protocol, не timestamp з HTTP request.
+6. Confirmed paid fact зв’язується зі snapshot; persisted final charge inputs перевіряються проти snapshot. Mismatch не дає права обчислити іншу reward за current policy або silently grant; потрібна explicit reconciliation. `paidAt` лишається authoritative persisted confirmed Paid time за H-1.
+7. Purchase залишається pending до qualifying completion. Maturation використовує saved entitlement/result і historical calculator semantics; не повторює selection за now. Source issuance фіксує власний first committed issuance time за H-4. Refund/correction застосовує source-linked lifecycle, а не поточні rates.
+
+**Мінімальний snapshot content:**
+
+| Група | Frozen evidence |
+| --- | --- |
+| Identity / ownership | snapshotId, userId/orderId/paymentAttemptId, prepare command identity і payload fingerprint |
+| Configuration | policyId/version, canonical configuration hash, selection/control generation, format/calculator version |
+| Inputs | authoritative quote/session references, eligible cash/currency, pointsUsed, tier і supporting fact revisions |
+| Calculation | rate, cap, matching/excluded rules з причинами, campaignId/revision/ruleId, chosen multiplier, floor/cap outputs і expected purchase reward |
+| Calendar | policyFixedAt, applicable resolved occurrence boundaries/offset context і timezone resolution metadata |
+| Birthday | verified eligibility evidence/cutoff/anniversary і reservation owner/result, коли застосовно; gift state окремо |
+| Lifecycle links | original initiation deadline; посилання на durable start/outcome/reservation state, яке може змінюватися без зміни snapshot payload |
+
+Наявність hash не замінює збереження original payload/result: historical evaluation має бути можливою після видалення Redis cache або delivered outbox records. Versions і referenced campaign revisions не видаляються, поки потрібні snapshots/accounting/audit. Retention/архівація — окреме implementation рішення, не дозвіл втратити replay.
+
+Майбутні Orders ↔ Loyalty contracts мають передати snapshot identity/ownership, source references, version/hash і amount/currency validation; paid-event ingestion має посилатися на той самий snapshot. Names/field numbering визначаються окремим cross-repository proposal. Чинні gRPC/RMQ contracts не змінено цим документом. SnapshotId — не transport MessageId і не provider transaction ID.
+
+```mermaid
+sequenceDiagram
+    participant O as Orders
+    participant L as Loyalty
+    participant DB as Loyalty PostgreSQL
+    participant P as Payments
+    O->>L: Prepare with stable attempt and trusted inputs
+    L->>DB: Lock, select, calculate, persist snapshot and reservations
+    DB-->>L: Commit
+    L-->>O: Original snapshot result
+    O->>O: Persist snapshot reference and attempt ownership
+    O->>L: Idempotent start authorization within deadline
+    L-->>O: Durable start result
+    O->>P: Execute outside database locks
+    P-->>O: Confirmed or Unknown outcome
+    Note over O,L: Unknown retains original snapshot pending reconciliation
+    O-->>L: Authoritative paid and completion facts
+    L->>DB: Issue once from frozen result via accounting
+```
+
+Це концептуальний lifecycle, не завершений wire protocol: operational crash windows між local commits мають бути закриті exact replay/recovery в 4D та Stage 6. Reward не залежить від reward confirmation, поверненого Payments, і не видається тільки через successful start authorization.
+
+### L.7. Admin operations, presets та simulator
+
+Admin бачить current base version, effective campaign/control state, майбутні activations, policy history, actor/reason і as-of timestamp. Published ≠ selected; selected base version ≠ наявність extra для кожної покупки. Preview показує саме ці відмінності.
+
+| Дія | Мінімальна поведінка |
+| --- | --- |
+| Create/edit draft | Від порожньої валідованої форми, preset або published clone; save із expected draft revision; unknown fields rejected |
+| Validate | Schema/bounds/monotone rates, campaign references/filters/timezone/DST, compatibility і timeline conflicts; errors не перетворюються на default values |
+| Preview/simulate | Current proposed payload, diff, resulting scenarios, affected rules, campaign suppressions і наступні scheduled transitions; result прив’язаний до revision |
+| Publish now/schedule | Trusted Admin, reason, command identity, expected draft/selection revisions; explicit confirmation після актуального preview; canonical committed result |
+| Cancel planned activation | Audited cancellation, без видалення immutable version; зміна timeline вимагає нового preview concurrency token |
+| Restore configuration | Clone old published payload у новий draft → validate/preview → new publication; не edit старої version |
+| Disable/resume campaign | CampaignId-wide control за L.4; preview/response пояснює вплив на new selections та незмінність fixed snapshots |
+| Inspect history | Before/after diff, operation identities, published payload і activation/control history; immutable evidence без secrets |
+
+**Presets:** Economy preset містить base rates/cap; Campaign preset — одну typed campaign definition. Apply Economy preset не переписує campaigns, apply Campaign preset не змінює rates/cap. Обидва показують точний diff до підтвердження. Duplicate campaign preset зазвичай створює нову campaign identity, а explicit edit існуючої — її нову revision; UI не має випадково обійти global disable шляхом прихованої зміни campaignId. Clone повної policy — окрема дія для всього bundle.
+
+Create/edit/duplicate/archive presets доступні Admin, як і решта actions R3-04. Delete допустимий лише для непотрібного unpublished template без необхідних references; інакше archive. Зміна template не змінює жодного draft/published payload заднім числом. Normal Economy, Weekend Boost, Holiday Event, Premiere Week і Custom — приклади назв, не дозвіл вигадати непогоджені defaults. Крім Normal Economy та Weekend ×1,25, інші presets потребують явного налаштування перед publication.
+
+**Manual simulator MVP:** приймає selected published version або draft revision, tier, eligible paid amount/currency, pointsUsed, hypothetical policyFixedAt, authoritative-shaped session/promotion context і explicit birthday eligibility/budget/gift assumptions. Не приймає client-calculated reward як правильну відповідь. Не шукає персональні facts за userId і не стверджує confirmed eligibility із manual flags.
+
+Output містить version/revision/calculator і assumptions, applicable rules, reasons excluded, base amount до promo, multiplier, uncapped calculation, результат одного floor/cap, birthday counterfactual/extra при заданому budget та total expected reward. Якщо відсутній input, необхідний для birthday/schedule, показується incomplete/invalid scenario, а не вигаданий ordinary результат. Historical/future what-if із явно вибраною version маркується як сценарій, не доказ, що version реально була/буде selected у цей час.
+
+Simulator використовує той самий pure calculator, що checkout, але не робить financial writes, reservation, processed_events або checkout snapshots. Не створює LoyaltyProfile і не витрачає budgets. Результат не гарантує майбутній checkout result: до реального prepare можуть змінитися inputs/selection/eligibility. Варіант real-user read-only simulation відкладено до окремого approval та готовності Stages 5/6/privacy controls.
+
+### L.8. Real-time semantics, consistency та operational failures
+
+«Real-time» MVP — near-real-time admin visibility: polling кожні 10 секунд, негайний refresh після власної committed дії та при відновленні view/connection. Це не SLA відповіді за 10 секунд під час outage. Dashboard показує last successful refresh, as-of/revision і stale/offline status; не видає optimistic UI result за completed publication.
+
+| Механізм | Оцінка / рішення |
+| --- | --- |
+| Polling | MVP: мінімум operational state; lost update notification відновлюється наступним authoritative read |
+| SSE + polling fallback | Deferred, якщо latency/load measurements виправдають push; потрібні reconnect/proxy/auth checks |
+| WebSockets | Не потрібні для одностороннього configuration update; без двостороннього use case не вводити |
+| PostgreSQL | Authority для catalog/timeline/controls, idempotency й audit |
+| Redis | Optional immutable payload cache; outage не скасовує PG authority або fixed snapshots |
+| Durable notifications | MVP не потребує нового event pipeline для UI. За майбутнього push можна використати наявний outbox/recovery, але notification не є фактом перемикання всіх replicas |
+
+Для new prepare selection завжди авторитетно перевіряється в PG. Кешований immutable payload можна використати після перевірки selected identity/hash/compatibility. Одна generation не доводить, що cached active pointer актуальний: scheduled activation або campaign boundary можуть настати без нового DB write. Тому поточна DB decision time і schedule/control lookup не замінюються Redis TTL чи browser state.
+
+| Failure / race | Очікуване відновлення та гарантія |
+| --- | --- |
+| Два Admin редагують один draft | Optimistic revision відхиляє stale save; reload/diff, без silent last-write-wins |
+| Два concurrent publications/schedule edits | Expected selection revision + DB arbitration: один committed результат, другий conflict; немає невидимого overwrite |
+| Publish commit, response lost | Повтор того самого operation identity читає saved result; не створює ще одну version/activation |
+| Кілька Loyalty instances | Обирають із shared PG timeline/controls; локальний кеш не є authority |
+| Redis outage / invalidation lost | PG lookup + immutable payload recovery; без unverified stale prepare |
+| Notification lost | Polling/reload читає committed state; business correctness не залежить від notification |
+| Service restart | Catalog/timeline/snapshots збережені; due selection відновлюється з DB, не тільки job memory |
+| Activation boundary без scheduler tick | Selection порівнює effectiveAt із authoritative cutoff; стара pointer cache не продовжує policy |
+| Orders має старий preview/config | Новий prepare перевіряє актуальність; browser/Orders cache не створює authoritative snapshot |
+| Loyalty/PG unavailable | New prepare temporary failure, no dependent charge; existing fixed outcomes/Unknown не змінюються |
+| Disable/resume одночасно з prepare | Спільна selection arbitration визначає порядок; committed snapshot має одну control revision, не суміш станів |
+| Timezone rules стали несумісними | Future eligibility revalidation / temporary failure affected prepare; жодного silent skip і жодної переоцінки fixed snapshots |
+
+```mermaid
+flowchart LR
+    UI[Admin dashboard] -->|Authenticated operation| API[Backend admin API]
+    API -->|Trusted service and actor| L[Loyalty policy operations]
+    L -->|Atomic publication and audit| PG[(PostgreSQL)]
+    UI -->|Poll every 10 seconds or refresh after action| API
+    API -->|Read committed policy view| L
+    PG -->|Selected version and as-of context| L
+    L -->|View and revision| API
+    API -->|Refresh view| UI
+```
+
+Ця схема не створює другий source of truth у backend. Application-level caches/notifications не можуть обіцяти, що всі replicas одночасно «перемкнулися». Час і порядок authoritative operations важливіші за час оновлення екрана.
+
+### L.9. Authorization, audit та safety
+
+**Обов’язково для MVP:**
+
+- Backend перевіряє authenticated identity і роль Admin на кожній read/write/simulation operation. При відсутності trusted actor operation відхиляється, а не записується як `UnknownAdmin`. Browser не задає actorId у довільному payload.
+- Internal caller автентифікується окремо від кінцевого actor. Loyalty довіряє actor context лише через узгоджений захищений server-to-server boundary; сам `x-api-key` не доводить Admin role. Нові API мають явний authorization contract.
+- Actor, reason для контрольованих змін, operation identity, DB timestamps, expected revisions та before/after evidence зберігаються з committed зміною. Draft save history прив’язана до actor/revision; publication/control actions мають окремий reason. Audit не містить tokens, keys або зайвих customer data.
+- Published payloads immutable; history/archive не обходять identity constraints. Exact replay повертає збережений результат; той самий operationId з іншими даними відхиляється.
+- Optimistic concurrency діє на draft, preset і selection timeline. Preview старої revision не дозволяє silently publish нову. Conflict потребує reload/підтвердження актуального diff, не blind force retry.
+- Server validation перевіряє L.3 bounds і L.4 schedules/filters. Unknown JSON fields, unsupported calculator/format versions, invalid references і небезпечні числові значення відхиляються. Frontend validation — лише UX.
+- Перед publication показуються old/new rates/cap, campaign changes, examples/estimated effect, immediate/scheduled impact і наступні activations. Це safety preview, не доказ загальної profitability або гарантованого campaign cost.
+- Emergency disable/resume — той самий authorized/audited path, без shell/database bypass. Підтверджена помилка вже issued reward виправляється окремою source-linked correction за H-11, не переписуванням policy history.
+
+У MVP один Admin може публікувати негайно. Це прийнятий trust tradeoff: audit допомагає розслідуванню, але не запобігає всім помилкам привілейованого користувача. Separate editor/publisher roles, two-person approval і додаткові risk-based limits — later hardening, не прихована вимога першого релізу.
+
+Не використовувати policy editor для balance adjustments, зміни refund deadlines, GOLD ownership, birthday entitlements, debt forgiveness або запуску arbitrary code. Rate/multiplier/cap bounds обмежують reward однієї покупки, не сумарний бюджет кампанії; splitting orders лишається прийнятим компромісом B.1.
+
+### L.10. Business examples
+
+У прикладах `P` — eligible cash component після redemption, не повна ціна до points. Initial rates 3/4/5%, cap 200; gift/achievements не включено в колонку основної reward. Birthday приклади припускають verified eligibility і sufficient reserved budget, якщо не зазначено інше. Реальний simulator явно показує ці assumptions.
+
+`N1` — published Normal Economy без Weekend Boost. `W1` — приклад окремо published policy з Weekend ×1,25. Значення ×1,25 погоджене як preset R3-14, **сама W1 не активована цим документом**. Інші сценарні versions/часи — ілюстрації lifecycle, не вже published конфігурації.
+
+| № / сценарій | Selected policy / eligibility time | Multiplier | Очікувана основна reward або state / збережений інваріант |
+| --- | --- | --- | --- |
+| 1. Weekday BRONZE, P=1000 | N1, weekday policyFixedAt | ×1 | `floor(1000×0,03)=30`; без Weekend |
+| 2. Weekend BRONZE, P=1000 | W1, субота policyFixedAt | ×1,25 | `floor(37,5)=37`; один floor |
+| 3. Weekend GOLD, P=1000 | W1, неділя policyFixedAt | ×1,25 | `floor(62,5)=62`; base rate 5% |
+| 4. Weekend + Premiere BRONZE, P=1000 | W1, weekend snapshot + verified premiere context | max(1,25;1,5)=1,5 | 45, не stacking 56; original rule preserved |
+| 5. Weekend + Birthday BRONZE, P=1000 | W1, eligible birthday-day snapshot | normal 1,25; candidate 2 | Normal 37, withBirthday 60, requested extra 23. За budget≥23 reward60; за budget10 reward47. Gift окремо |
+| 6. Reward cap, GOLD, P=4000 | W1, weekend policyFixedAt | ×1,25 | `floor(250)` capped до200. Birthday ×2 теж capped200, тому birthday extra0; cap не застосовується до окремого gift |
+| 7. Policy update після snapshot | W1 frozen GOLD5%; нова W2 має GOLD4,5%, SILVER4%, BRONZE3% | Frozen ×1,25 | P=1000: old attempt62, новий W2 snapshot56. Не перераховувати old62 за W2 |
+| 8. Campaign end до payment confirmation | W1 fixed Нд23:58, deadline Пн00:13; start00:02, confirmation00:20 | Frozen ×1,25 | BRONZE P=1000 →37, хоч campaign interval закінчився Пн00:00; H-1/H-7 |
+| 9. Unknown через campaign expiry | W1 fixed Нд23:58, start23:59, Unknown; authoritative success у понеділок | Frozen ×1,25 | 37 після qualifying completion; reservation не released через timeout/expiry, paidAt визначає confirmed transition |
+| 10. Emergency disable під час provider outage | W1 snapshot17:59 + timely start; disable18:00 у weekend | Старий ×1,25, новий ×1 | Old Unknown зберігає37; new snapshot18:01 BRONZE P=1000 →30. Future policies не обходять global disable |
+| 11. Два Admin публікують competing drafts | Обидва preview selection revision S; перший committed зміну на S+1 | Визначає лише committed selection | Другий отримує conflict/reload; немає silent overwrite чи змішаних payloads; actor/reason обох attempts auditable |
+| 12. Delayed completion після supersession | W1 GOLD P=1000 snapshot; completion/fact оброблено після W2/W3 | Frozen ×1,25 | Reward62 після qualifying completion, один accounting effect. Нові policy/tier не змінюють його; 12-month expiry від first committed issuance, не від old snapshot |
+
+Коли payment не почато в 15-minute window, приклади 8/9 не дають права використати старий snapshot: потрібне authoritative release/reprepare. Приклад 10 не означає, що Unknown можна завершити без provider evidence. Examples не доводять production provider reliability або прибутковість.
+
+### L.11. Verification та додаткові configuration invariants
+
+Існуючі I-01…I-33 перевіряються без послаблень. Додаткові guarantees для policy layer:
+
+| ID | Guarantee | Обов’язковий рівень майбутньої перевірки |
+| --- | --- | --- |
+| P-01 | Published payload і fixed snapshot immutable; historical version/calculator доступні для replay | PG constraints/update-delete negatives, reload/restart, historical fixtures |
+| P-02 | Один coherent selection за cutoff, без залежності від tick/current Redis pointer | PG activation/disable/prepare concurrency з реальними barriers; multi-instance/restart |
+| P-03 | Publication/version/schedule/audit/idempotent result atomic; duplicate command не створює друге activation | PG rollback/fault injection, ambiguous commit/fresh-scope lookup, HTTP retry |
+| P-04 | Caps/rates/birthday max і tie-breaker однакові у preview та checkout | Unit fixtures для всіх L.10 examples, fractional amounts, integer bounds, exact floor/cap |
+| P-05 | Новий prepare не використовує unverified stale configuration або incomplete eligibility | PG + actual service contract tests при Redis/DB/service outage, stale Orders cache, schedule boundary |
+| P-06 | H-1/H-7 зберігаються через supersession/end/disable/Unknown | Backend/Loyalty PG, real gRPC/RMQ, cross-service E2E на exact SHA pair |
+| P-07 | Calendar resolution deterministic; unknown/ambiguous не стає ordinary reward мовчки | Controlled-clock unit/PG: `[start,end)`, midnight/week crossing, gap/fold, timezone-rules update |
+| P-08 | Admin identity/role/revisions перевірені server-side; simulation не створює financial effects | Actual HTTP/internal-boundary auth negatives, PG state comparisons до/після simulator |
+| P-09 | Preset apply/rollback не мутують referenced historical data або обминають disable | Unit diff + PG immutable/replay tests; UI confirmation/conflict tests |
+| P-10 | Dashboard stale/refresh/notification не визначають accounting correctness | Browser/API polling/reconnect/failure tests; independent DB assertions snapshot/result |
+
+Мінімальні конкретні regression scenarios:
+
+1. Рівні base rates дозволені, zero/negative/>5% відхилені; cap0/201 і multiplier>2/unsupported precision не публікуються. Спроба змінити hard limits/known fixed fields rejected.
+2. Weekend+premiere, weekend+birthday, campaign×2+birthday, several equal maxima, targeted lower-tier rate; однаковий результат незалежно від input row order/actor.
+3. Once/weekly exact start/end, Sat00:00/Mon00:00 Kyiv, DST crossings та invalid boundaries; recurrence validation не обмежена найближчим безпроблемним тижнем.
+4. Publication/prepare в обох commit orders, два Admin з однією revision, duplicate publish і same key/different payload. Barrier має показувати actual lock overlap, не лише Promise.all.
+5. Immediate version при existing future schedule, cancelled activation, rollback clone і emergency disable/resume в іншій scheduled version. Номер version не визначає current selection.
+6. Publish/prepare commit із lost response, service restart, activation при cache invalidation failure, Redis outage. Жоден retry не пересуває deadline або створює нову identity замість існуючої.
+7. Snapshot→policy update→timely start→delayed paid→completion, Unknown через campaign end, disable під час provider outage; original snapshot/state/source identity збережені. Start/release race і recovery доводяться в 4D/Stage6, не mocks-only.
+8. Completion/refund перед purchase, повторний RMQ event і real lost-ACK redelivery; earned reward використовує saved snapshot, source-linked refund не залежить від current policy.
+9. Manual simulator з birthday budget0/частковим/достатнім, cap saturation та incomplete context; profile/ledger/allocations/reservations/processed_events не змінюються.
+10. Неавторизований browser, forged actor, missing internal credentials, stale preview/save/publish, invalid session reference та unsupported schema/calculator. API keys не відображаються в browser responses/logs.
+
+До activation потрібні real PostgreSQL atomicity/concurrency, actual transport serialization/compatibility та cross-service checkout E2E з exact backend/Loyalty SHA pair. UI green або два окремі green CI не доводять integrated flow. Mock payment adapter позначається як mock; real provider outcomes/idempotency — окремі gates Payments integration. Тести й migrations виконуються лише на явно disposable infrastructure за дозволом implementation task.
+
+Це заплановані перевірки; під час specification update вони не виконувалися. Documentation gate — final diff, internal links/section references, H/R3 consistency, roadmap dependencies і `git diff --check`.
+
+### L.12. Rollout, dependencies та deferred capabilities
+
+PR #31–34 не переробляються під policy management: source accounting зберігає походження вже обчисленого entitlement, а не звертається до current policy. Existing active writers залишаються незмінними до coordinated cutover. Нова configuration не створює історичні sources або paid snapshots для старих balances/orders.
+
+Дозволений порядок: dormant policy model/calculator → selection/campaign safety → authorized admin API → Orders snapshot/pending earning integration → dashboard. Точні implementation PR boundaries — Stage 4; Stages 5/6 завершують tier/birthday dependencies, Stage 7 — achievements. Фінальні contracts, supported version rollout, all-writer consistency та Stage8 verification передують economy activation. Policy publication capability не є дозволом увімкнути неповний reward lifecycle.
+
+Deferred: monthly/yearly recurrence і exceptions, arbitrary multi-timezone campaigns, додатковий targeting поза R3-17, live-user simulation, SSE/WebSockets, separate permissions/two-person approval, campaign-level monetary budgets і економічна аналітика. Compatible stacking groups або multiplicative stacking не просто deferred technical feature: вони потребують явного нового business amendment. Dynamic qualification thresholds, birthday budgets, expiry/debt rules і нові GOLD benefits не дозволені цим дизайном.
+
+Ні notification, ні admin audit, ні per-order cap не гарантують прибутковість або production readiness. Наступний крок після product review цього документа — окремо погодити найближчий task чинного roadmap; не починати Stage4 або accounting cutover автоматично.
