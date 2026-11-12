@@ -380,6 +380,15 @@ export async function restorePoints(
   tx: Prisma.TransactionClient,
   input: RestorePoints,
 ): Promise<RestorationResult> {
+  return restorePointsAt(tx, input);
+}
+
+async function restorePointsAt(
+  tx: Prisma.TransactionClient,
+  input: RestorePoints,
+  decisionAt?: Date,
+  binding?: { refundLedgerId: string; commandEventId: string },
+): Promise<RestorationResult> {
   const command = restorationSchema.parse(input);
   await lockProfile(tx, command.userId);
   const existing = await tx.$queryRaw<
@@ -406,11 +415,13 @@ export async function restorePoints(
   const [redemption] = await tx.$queryRaw<Array<{ amount: number }>>`
     SELECT amount FROM point_redemptions WHERE user_id = ${command.userId}::uuid AND redemption_id = ${command.redemptionId}::uuid`;
   if (!redemption) throw new Error('Point redemption not found');
-  const [clock] = await tx.$queryRaw<
-    Array<{ restoredAt: Date }>
-  >`SELECT points_decision_time() AS "restoredAt"`;
-  await tx.$executeRaw`INSERT INTO point_restorations (user_id, restoration_id, redemption_id, amount, restored_at)
-    VALUES (${command.userId}::uuid, ${command.restorationId}::uuid, ${command.redemptionId}::uuid, ${redemption.amount}, ${clock.restoredAt})`;
+  const [clock] = decisionAt
+    ? [{ restoredAt: decisionAt }]
+    : await tx.$queryRaw<
+        Array<{ restoredAt: Date }>
+      >`SELECT points_decision_time() AS "restoredAt"`;
+  await tx.$executeRaw`INSERT INTO point_restorations (user_id, restoration_id, redemption_id, amount, restored_at, refund_ledger_id, command_event_id)
+    VALUES (${command.userId}::uuid, ${command.restorationId}::uuid, ${command.redemptionId}::uuid, ${redemption.amount}, ${clock.restoredAt}, ${binding?.refundLedgerId ?? null}::uuid, ${binding?.commandEventId ?? null})`;
   const funding = await tx.$queryRaw<
     Array<{ sourceId: string; amount: number; originalExpiresAt: Date }>
   >`
@@ -752,6 +763,131 @@ export async function debitCheckoutPoints(
       balance: balanceAfter,
       lastActivityAt: clock.decisionAt,
     },
+  });
+  return { success: true, balanceAfter, errorMessage: '' };
+}
+
+/** Dormant full checkout compensation. Errors require caller transaction rollback. */
+export async function refundCheckoutPoints(
+  tx: Prisma.TransactionClient,
+  input: CheckoutPointsDebit,
+): Promise<PointCommandResult> {
+  const command = parsePointCommand({ ...input, operation: 'REFUND' });
+  const reject = (errorMessage: string): PointCommandResult => ({
+    success: false,
+    balanceAfter: 0,
+    errorMessage,
+  });
+  if (!command) return reject(ERROR_MESSAGES.INVALID_POINT_COMMAND);
+  await lockProfile(tx, command.userId);
+  await requireReadCommitted(tx);
+  const replay = await replayPointCommand(tx, command);
+  if (replay) return replay;
+  const debits = await tx.pointsTransaction.findMany({
+    where: {
+      userId: command.userId,
+      orderId: command.orderId,
+      type: PointsTransactionType.BURN_DISCOUNT,
+      points: { lt: 0 },
+    },
+    take: 2,
+  });
+  if (!debits.length) return reject(ERROR_MESSAGES.REFUND_DEBIT_NOT_FOUND);
+  if (debits.length !== 1) return reject(ERROR_MESSAGES.REFUND_RECONCILIATION);
+  const debit = debits[0];
+  const checkout = await tx.checkoutDebit.findUnique({
+    where: { debitId: debit.id },
+  });
+  const priorRefund = await tx.pointsTransaction.findFirst({
+    where: {
+      userId: command.userId,
+      orderId: command.orderId,
+      type: PointsTransactionType.REFUND,
+    },
+  });
+  if (priorRefund || checkout?.refundId)
+    return reject(ERROR_MESSAGES.REFUND_ALREADY_COMPENSATED);
+  if (command.amount !== -debit.points)
+    return reject(ERROR_MESSAGES.REFUND_AMOUNT_MISMATCH);
+  const redemption = await tx.pointRedemption.findUnique({
+    where: { checkoutDebitId: debit.id },
+    include: { restoration: true },
+  });
+  if (
+    !checkout ||
+    !redemption ||
+    redemption.userId !== command.userId ||
+    redemption.debitRef !== debit.id ||
+    redemption.amount !== command.amount ||
+    !redemption.commandEventId
+  )
+    return reject(ERROR_MESSAGES.REFUND_RECONCILIATION);
+  if (redemption.restoration)
+    return reject(ERROR_MESSAGES.REFUND_ALREADY_COMPENSATED);
+  const [clock] = await tx.$queryRaw<
+    Array<{ decisionAt: Date }>
+  >`SELECT points_decision_time() AS "decisionAt"`;
+  const before = await pointsAvailabilityAt(
+    tx,
+    command.userId,
+    clock.decisionAt,
+  );
+  const profile = await tx.loyaltyProfile.findUniqueOrThrow({
+    where: { userId: command.userId },
+  });
+  if (BigInt(profile.balance) !== before.spendable)
+    throw new Error('Source balance projection mismatch');
+  // Predict using the same policy and clock as restoration, before claiming a
+  // globally shared key. A lost claim must return without any financial writes.
+  const [projection] = await tx.$queryRaw<Array<{ delta: bigint }>>`
+    SELECT coalesce(sum(CASE WHEN s.original_expires_at > ${clock.decisionAt}
+      OR coalesce(e.expires_at, point_extension_deadline(${clock.decisionAt}::timestamptz)) > ${clock.decisionAt}
+      THEN f.amount::bigint ELSE 0 END),0)::bigint AS delta
+    FROM point_funding f JOIN point_sources s USING (user_id, source_id)
+    LEFT JOIN point_source_extensions e USING (user_id, source_id)
+    WHERE f.user_id = ${command.userId}::uuid AND f.redemption_id = ${redemption.redemptionId}::uuid`;
+  const projected = before.spendable + projection.delta;
+  if (projected < 0n || projected > 2147483647n)
+    throw new Error('Source balance exceeds int32');
+  const balanceAfter = Number(projected);
+  const racedReplay = await claimPointCommand(tx, command, balanceAfter);
+  if (racedReplay) return racedReplay;
+  const refund = await tx.pointsTransaction.create({
+    data: {
+      userId: command.userId,
+      orderId: command.orderId,
+      type: PointsTransactionType.REFUND,
+      points: command.amount,
+      balanceAfter,
+      description: `Refund for failed order ${command.orderId}`,
+    },
+  });
+  const linked = await tx.checkoutDebit.updateMany({
+    where: { debitId: debit.id, refundId: null },
+    data: { refundId: refund.id },
+  });
+  if (linked.count !== 1)
+    throw new Error('Checkout compensation ownership changed');
+  await restorePointsAt(
+    tx,
+    {
+      userId: command.userId,
+      redemptionId: redemption.redemptionId,
+      restorationId: randomUUID(),
+    },
+    clock.decisionAt,
+    { refundLedgerId: refund.id, commandEventId: command.idempotencyKey },
+  );
+  const after = await pointsAvailabilityAt(
+    tx,
+    command.userId,
+    clock.decisionAt,
+  );
+  if (after.spendable !== projected)
+    throw new Error('Restoration projection mismatch');
+  await tx.loyaltyProfile.update({
+    where: { userId: command.userId },
+    data: { balance: balanceAfter },
   });
   return { success: true, balanceAfter, errorMessage: '' };
 }

@@ -81,14 +81,15 @@ model LoyaltyProfile {
 }
 
 model ProcessedEvent {
-  eventId         String           @id @map("event_id") @db.VarChar(128)
-  processedAt     DateTime         @default(now()) @map("processed_at") @db.Timestamptz()
-  operation       String?          @db.VarChar(16)
-  userId          String?          @map("user_id") @db.Uuid
-  orderId         String?          @map("order_id") @db.Uuid
-  amount          Int?
-  balanceAfter    Int?             @map("balance_after")
-  pointRedemption PointRedemption?
+  eventId          String            @id @map("event_id") @db.VarChar(128)
+  processedAt      DateTime          @default(now()) @map("processed_at") @db.Timestamptz()
+  operation        String?           @db.VarChar(16)
+  userId           String?           @map("user_id") @db.Uuid
+  orderId          String?           @map("order_id") @db.Uuid
+  amount           Int?
+  balanceAfter     Int?              @map("balance_after")
+  pointRedemption  PointRedemption?
+  pointRestoration PointRestoration?
 
   @@map("processed_events")
 }
@@ -103,8 +104,9 @@ model PointsTransaction {
   description  String?  @db.Text
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz()
 
-  checkoutDebit  CheckoutDebit? @relation("CheckoutDebit")
-  checkoutRefund CheckoutDebit? @relation("CheckoutRefund")
+  checkoutDebit    CheckoutDebit?    @relation("CheckoutDebit")
+  checkoutRefund   CheckoutDebit?    @relation("CheckoutRefund")
+  pointRestoration PointRestoration?
 
   @@index([userId])
   @@index([createdAt])
@@ -373,15 +375,19 @@ model PointFunding {
 }
 
 model PointRestoration {
-  userId        String                  @map("user_id") @db.Uuid
-  restorationId String                  @map("restoration_id") @db.Uuid
-  redemptionId  String                  @map("redemption_id") @db.Uuid
-  amount        Int
-  credited      Int                     @default(0)
-  restoredAt    DateTime                @map("restored_at") @db.Timestamptz(3)
-  redemption    PointRedemption         @relation(fields: [userId, redemptionId], references: [userId, redemptionId], onDelete: Restrict)
-  funding       PointRestorationSplit[]
-  extensions    PointSourceExtension[]
+  refundLedgerId String?                 @unique @map("refund_ledger_id") @db.Uuid
+  commandEventId String?                 @unique @map("command_event_id") @db.VarChar(128)
+  refundLedger   PointsTransaction?      @relation(fields: [refundLedgerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  commandEvent   ProcessedEvent?         @relation(fields: [commandEventId], references: [eventId], onDelete: Restrict, onUpdate: Restrict)
+  userId         String                  @map("user_id") @db.Uuid
+  restorationId  String                  @map("restoration_id") @db.Uuid
+  redemptionId   String                  @map("redemption_id") @db.Uuid
+  amount         Int
+  credited       Int                     @default(0)
+  restoredAt     DateTime                @map("restored_at") @db.Timestamptz(3)
+  redemption     PointRedemption         @relation(fields: [userId, redemptionId], references: [userId, redemptionId], onDelete: Restrict)
+  funding        PointRestorationSplit[]
+  extensions     PointSourceExtension[]
 
   @@id([userId, restorationId])
   @@unique([userId, redemptionId])
