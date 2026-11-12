@@ -367,8 +367,23 @@ it.each([0, -1, 1.5, 2147483648, Number.NaN])(
 );
 it('retains the existing minimum deduction rule', async () => {
   await source();
-  expect(await run({ ...input, amount: 1 })).toMatchObject({ success: false });
-  expect((await snapshot()).counts.ledger).toBe(0n);
+  const saved = await snapshot();
+  const savedSources = await prisma.pointSource.findMany();
+  expect(saved.counts.ledger).toBe(0n);
+  for (const amount of [1, 25, 74]) {
+    expect(await run({ ...input, amount })).toEqual({
+      success: false,
+      balanceAfter: 0,
+      errorMessage: 'Minimum deduction is 75 points',
+    });
+    expect(await snapshot()).toEqual(saved);
+    expect(await prisma.pointSource.findMany()).toEqual(savedSources);
+  }
+  expect(await run({ ...input, amount: 75 })).toEqual({
+    success: true,
+    balanceAfter: 25,
+    errorMessage: '',
+  });
 });
 it('accepts the largest positive int32 debit without overflow', async () => {
   await prisma.loyaltyProfile.update({
